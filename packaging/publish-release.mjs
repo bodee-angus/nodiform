@@ -100,6 +100,8 @@ if (release) {
     '',
     'Native 2D graph experiments for Bazzite/Linux x86_64. This is an early testing build, not a stable release.',
     '',
+    `See [what changed in this version](https://github.com/${repository}/blob/${commit}/CHANGELOG.md).`,
+    '',
     'Download **Nodiform-x86_64.AppImage** and open it with Gear Lever to add it to application search. Allow it to replace the older version when updating.',
     '',
     'The AppImage contains Nodiform, its icon, examples, and documentation. Vulkan graphics drivers and FFmpeg are supplied by the host. Preview does not require FFmpeg; recording requires a working host FFmpeg with libx264 or supported NVIDIA NVENC.',

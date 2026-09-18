@@ -3,6 +3,7 @@
 //! This is syntax highlighting and editing assistance, not a language server.
 //! A single scroll surface keeps the gutter and source lines together.
 
+use crate::theme::Palette;
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, RichText, TextFormat};
 use std::ops::Range;
 
@@ -22,25 +23,30 @@ enum Snippet {
     Pause,
     Loop,
     Controls,
+    Palette,
 }
 
 impl Snippet {
     fn text(self, style: ScriptStyle) -> &'static str {
         match (self, style) {
             (Self::Node, ScriptStyle::Builder) =>
-                "graph.add('new-node', { color: '#007aff' });\n",
+                "graph.add('new-node', { color: '#17d9cb' });\n",
             (Self::Connection, ScriptStyle::Builder) =>
-                "graph.connect('source', 'target', { strength: 1, color: '#72859b' });\n",
+                "graph.connect('source', 'target', { strength: 4, gradient: true });\n",
             (Self::Pause, ScriptStyle::Builder) => "graph.wait(120);\n",
             (Self::Loop, ScriptStyle::Builder) =>
                 "for (let i = 1; i <= 10; i++) {\n  graph.add(i);\n  graph.wait(12);\n}\n",
             (Self::Node, ScriptStyle::Generator) =>
-                "yield N.batch([N.node('new-node', { color: '#007aff' })], []);\n",
+                "yield N.batch([N.node('new-node', { color: '#17d9cb' })], []);\n",
             (Self::Connection, ScriptStyle::Generator) =>
-                "yield N.batch([], [N.edge('source', 'target', { id: 'connection', strength: 1 })]);\n",
+                "yield N.batch([], [N.edge('source', 'target', { id: 'connection', strength: 4, gradient: true })]);\n",
             (Self::Pause, ScriptStyle::Generator) => "yield N.wait(120);\n",
             (Self::Loop, ScriptStyle::Generator) =>
                 "for (let i = 1; i <= 10; i++) {\n  yield N.batch([N.node(String(i))], []);\n  yield N.wait(12);\n}\n",
+            (Self::Palette, ScriptStyle::Builder) =>
+                "const colors = graph.palette(5);\n",
+            (Self::Palette, ScriptStyle::Generator) =>
+                "const colors = N.palette(5);\n",
             (Self::Controls, _) =>
                 "/* @controls\n{\n  \"count\": { \"type\": \"integer\", \"label\": \"Count\", \"default\": 10, \"min\": 1, \"max\": 500 }\n}\n*/\n\n",
         }
@@ -59,17 +65,14 @@ pub fn show(ui: &mut egui::Ui, source: &mut String, enabled: bool) -> egui::Resp
 }
 
 fn show_inner(ui: &mut egui::Ui, source: &mut String, enabled: bool) -> egui::Response {
+    let p = Palette::for_ui(ui);
     let editor_id = ui.make_persistent_id("nodiform-rule-editor");
     let selection_id = editor_id.with("selection");
     let mut snippet = None;
 
     let style = script_style(source);
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("JavaScript")
-                .size(12.0)
-                .color(Color32::from_rgb(99, 104, 115)),
-        );
+        ui.label(RichText::new("JavaScript").size(12.0).color(p.secondary));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.menu_button("Reference", |ui| {
                 reference(ui, style);
@@ -79,6 +82,11 @@ fn show_inner(ui: &mut egui::Ui, source: &mut String, enabled: bool) -> egui::Re
                     ui.set_min_width(190.0);
                     for (label, choice, tip) in [
                         ("Node", Snippet::Node, "Add a node with a unique ID."),
+                        (
+                            "Colour palette",
+                            Snippet::Palette,
+                            "Generate vibrant, distinct hex colours in OKLCH.",
+                        ),
                         (
                             "Connection",
                             Snippet::Connection,
@@ -143,18 +151,18 @@ fn show_inner(ui: &mut egui::Ui, source: &mut String, enabled: bool) -> egui::Re
         .collect::<Vec<_>>()
         .join("\n");
     let mut gutter_job = LayoutJob::default();
-    gutter_job.append(&gutter, 0.0, format(Color32::from_rgb(159, 165, 176)));
+    gutter_job.append(&gutter, 0.0, format(p.gutter));
     gutter_job.halign = egui::Align::RIGHT;
     let height = (ui.available_height() - 54.0).max(LINE_HEIGHT);
     let mut layouter = |ui: &egui::Ui, text: &str, _wrap_width: f32| {
-        ui.fonts(|fonts| fonts.layout_job(highlight(text)))
+        ui.fonts(|fonts| fonts.layout_job(highlight(text, Palette::for_ui(ui))))
     };
 
     let result = egui::Frame::new()
-        .fill(Color32::from_rgb(255, 255, 254))
+        .fill(p.editor)
         .inner_margin(14.0)
         .corner_radius(16)
-        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(225, 228, 234)))
+        .stroke(egui::Stroke::new(1.0_f32, p.line))
         .show(ui, |ui| {
             egui::ScrollArea::both()
                 .id_salt(editor_id.with("scroll"))
@@ -231,6 +239,7 @@ fn show_inner(ui: &mut egui::Ui, source: &mut String, enabled: bool) -> egui::Re
 }
 
 fn reference(ui: &mut egui::Ui, style: ScriptStyle) {
+    let p = Palette::for_ui(ui);
     ui.set_width(380.0);
     egui::ScrollArea::vertical()
         .max_height(390.0)
@@ -242,11 +251,12 @@ fn reference(ui: &mut egui::Ui, style: ScriptStyle) {
                     "Define function build(graph, p). Graph operations run in the order you write them; waits set the pace.",
                     &[
                         ("graph.add(id, { color, radius })", "Add a node. A number or string becomes its unique ID."),
-                        ("graph.connect(from, to, { strength, color })", "Connect existing nodes. The target can be one ID or an array of IDs."),
+                        ("graph.connect(from, to, { strength, gradient })", "Connect existing nodes. The target can be one ID or an array of IDs. Default strength is 4."),
                         ("graph.ids() · graph.others(id)", "Get node IDs in creation order, optionally excluding one node."),
                         ("graph.wait(ticks)", "Let the graph move for this many ticks before the next operation."),
                         ("graph.setNode(id, { color, radius })", "Change a node already in the graph."),
-                        ("graph.setEdge(edgeId, { strength, color })", "Change a connection. connect() returns an array of edge IDs."),
+                        ("graph.setEdge(edgeId, { strength, color, gradient })", "Change a connection. connect() returns an array of edge IDs."),
+                        ("graph.palette(count)", "Get vibrant hex colours spread through perceptual OKLCH space. Assign them with color: colors[index]."),
                         ("graph.random()", "Get a repeatable random number from this run's seed."),
                     ],
                 ),
@@ -254,11 +264,12 @@ fn reference(ui: &mut egui::Ui, style: ScriptStyle) {
                     "Define function* generate(N, params). Each yield produces an ordered event. Existing generator scripts remain supported.",
                     &[
                         ("N.node(id, { color, radius })", "Describe a node with a unique string ID."),
-                        ("N.edge(from, to, { id, strength, color })", "Describe a connection with a unique ID."),
+                        ("N.edge(from, to, { id, strength, gradient })", "Describe a connection with a unique ID. Default strength is 4."),
                         ("yield N.batch(nodes, edges)", "Introduce nodes and connections together."),
                         ("yield N.wait(ticks)", "Let the graph move for this many ticks before the next event."),
                         ("yield N.setNode(id, { color, radius })", "Change an existing node."),
-                        ("yield N.setEdge(id, { strength, color })", "Change an existing connection."),
+                        ("yield N.setEdge(id, { strength, color, gradient })", "Change an existing connection."),
+                        ("N.palette(count)", "Get vibrant hex colours spread through perceptual OKLCH space. Assign them with color: colors[index]."),
                         ("N.random()", "Get a repeatable random number from this run's seed."),
                     ],
                 ),
@@ -266,9 +277,12 @@ fn reference(ui: &mut egui::Ui, style: ScriptStyle) {
             ui.label(RichText::new(intro).size(12.0));
             for (signature, meaning) in entries {
                 ui.add_space(9.0);
-                ui.label(RichText::new(*signature).monospace().size(11.0).color(Color32::from_rgb(0, 103, 183)));
+                ui.label(RichText::new(*signature).monospace().size(11.0).color(p.accent));
                 ui.label(RichText::new(*meaning).size(12.0));
             }
+            ui.add_space(12.0);
+            ui.label(RichText::new("Edge colours").strong());
+            ui.label(RichText::new("Use gradient: true to blend the current endpoint colours along an edge. Node colour changes update it automatically. The alpha in color controls edge opacity; RGB is used for solid edges. Set gradient: false for a solid colour.").size(12.0));
             ui.add_space(12.0);
             ui.separator();
             ui.label(RichText::new("Optional controls").strong());
@@ -287,16 +301,16 @@ fn format(color: Color32) -> TextFormat {
     }
 }
 
-fn highlight(source: &str) -> LayoutJob {
+fn highlight(source: &str, p: Palette) -> LayoutJob {
     let mut job = LayoutJob::default();
     for (range, kind) in tokens(source) {
         let color = match kind {
-            Kind::Plain => Color32::from_rgb(39, 44, 55),
-            Kind::Keyword => Color32::from_rgb(135, 54, 165),
-            Kind::String => Color32::from_rgb(43, 116, 66),
-            Kind::Comment => Color32::from_rgb(119, 127, 139),
-            Kind::Number => Color32::from_rgb(174, 91, 28),
-            Kind::Api => Color32::from_rgb(0, 103, 183),
+            Kind::Plain => p.ink,
+            Kind::Keyword => p.keyword,
+            Kind::String => p.string,
+            Kind::Comment => p.comment,
+            Kind::Number => p.number,
+            Kind::Api => p.accent,
         };
         job.append(&source[range], 0.0, format(color));
     }
@@ -375,7 +389,7 @@ fn tokens(source: &str) -> Vec<(Range<usize>, Kind)> {
                     | "false" | "null" | "undefined" | "throw" | "try" | "catch" | "finally"
                     | "typeof" | "instanceof" | "delete" | "void" => Kind::Keyword,
                     "N" | "graph" | "add" | "connect" | "ids" | "others" | "node" | "edge"
-                    | "batch" | "wait" | "setNode" | "setEdge" | "random" => Kind::Api,
+                    | "batch" | "wait" | "setNode" | "setEdge" | "random" | "palette" => Kind::Api,
                     _ => Kind::Plain,
                 };
             } else {

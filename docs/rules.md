@@ -10,9 +10,10 @@ The default experiment has no inputs. Its values live directly in the code:
 
 ```js
 function build(graph) {
+  const colors = graph.palette(4);
   for (let n = 1; n <= 8; n++) {
-    graph.add(n, { color: "#8ecbff" });
-    if (n > 1) graph.connect(n, n - 1, { strength: 1 });
+    graph.add(n, { color: colors[(n - 1) % colors.length] });
+    if (n > 1) graph.connect(n, n - 1, { gradient: true });
     graph.wait(24);
   }
 }
@@ -26,7 +27,7 @@ function build(graph) {
 function build(graph) {
   for (let n = 1; n <= 500; n++) {
     graph.add(n);
-    graph.connect(n, graph.others(n), { strength: 1 });
+    graph.connect(n, graph.others(n), { strength: 4 });
     graph.wait(6);
   }
 }
@@ -44,10 +45,11 @@ This creates 500 nodes and `500 × 499 / 2 = 124,750` edges. Each pair is connec
 | `graph.connect(source, targetOrTargets, options)` | Add edges to one ID or an array of IDs; return an array of edge IDs. |
 | `graph.wait(ticks)` | Commit pending additions, then advance the force simulation by this many ticks. |
 | `graph.setNode(id, options)` | Commit pending additions, then change a node's colour or radius. |
-| `graph.setEdge(id, options)` | Commit pending additions, then change an edge's colour or strength. |
+| `graph.setEdge(id, options)` | Commit pending additions, then change an edge's colour, strength or gradient mode. |
 | `graph.random()` | Draw from the run's seeded pseudorandom sequence. |
+| `graph.palette(count)` | Return an array of vivid, perceptually spaced `#rrggbb` colours. |
 
-Node options are `label`, `color`, `radius`, and an optional initial `position: [x, y]`. Edge options are `id`, `color`, and `strength`. A custom edge ID can be supplied only when connecting to one target. For example:
+Node options are `label`, `color`, `radius`, and an optional initial `position: [x, y]`. Edge options are `id`, `color`, `strength`, and `gradient`. Edge strength defaults to **4**, and gradient mode defaults to **false**. A custom edge ID can be supplied only when connecting to one target. For example:
 
 ```js
 function build(graph) {
@@ -65,6 +67,31 @@ Builder IDs may be strings or finite numbers. Numeric IDs are converted to strin
 Colours accept `#RRGGBB` or `#RRGGBBAA`. Radius must be greater than zero and at most 1,000,000 world units. Strength must be between zero and 1,000,000; zero disables an edge's attraction without deleting it. Each birth coordinate must have an absolute value of at most 1,000,000. All numeric values must be finite. Typical experiments should use much smaller values.
 
 Edges attract both endpoints. `source` and `target` identify the connection; they do not make its force one-way. Multiple differently named edges between two nodes add their attractions together. Connection-based visual sizing deduplicates these differently, as described in the [architecture guide](architecture.md#connection-based-node-sizing).
+
+## Generate colours and blend edges
+
+Ask for the number of categories you need. The helper returns ordinary hex strings that work everywhere a node or edge colour is accepted:
+
+```js
+function build(graph) {
+  const [first, second] = graph.palette(2);
+  graph.add("A", { color: first });
+  graph.add("B", { color: second });
+  const [edge] = graph.connect("A", "B", {
+    gradient: true, color: "#ffffffcc"
+  });
+  graph.wait(240);
+  graph.setNode("B", { color: "#ff29bb" });
+  graph.wait(240); // The gradient follows B's new colour.
+  graph.setEdge(edge, { gradient: false, color: "#ffffff" });
+}
+```
+
+`graph.palette(count)` accepts an integer from 0 to 8192; zero returns an empty array. It uses Oklab/OKLCH with sRGB gamut handling to select vibrant colours. The same request returns the same hex codes, and increasing the count preserves the earlier colours. Returned arrays are independent copies. It does not consume `graph.random()` or require a network connection. **Insert → Colour palette** inserts the call in either editor API.
+
+Small palettes maximise separation among a fixed set of vivid candidates. Beyond 128 colours the helper uses deterministic sampling to keep the cost bounded. Hex values remain unique, but increasingly large palettes cannot remain easy to distinguish. This is not a colour-vision-deficiency guarantee.
+
+When `gradient: true`, the edge blends from its source node's current colour to its target's current colour in linear-light RGB. The `color` option's **alpha** controls edge opacity, multiplied by endpoint alpha; its RGB is ignored. `#ffffffcc` means 80% edge opacity, and `#ffffff` means fully opaque. Omitting `color` keeps the default edge opacity of 60%. Node colour updates affect gradients automatically in both preview and video. Set `gradient: false` to return to an ordinary solid edge.
 
 ## Optional script-defined inputs
 
@@ -133,11 +160,23 @@ function* generate(N, params) {
 }
 ```
 
-`N.node` and `N.edge` construct specifications for `N.batch`; they are not events to yield individually. `N.wait`, `N.setNode`, and `N.setEdge` produce events. `N.random` uses the same seeded sequence. Leading `@controls` metadata also works with this API.
+`N.node` and `N.edge` construct specifications for `N.batch`; they are not events to yield individually. `N.wait`, `N.setNode`, and `N.setEdge` produce events. `N.random` uses the same seeded sequence. `N.palette(count)` provides the same palette helper, and `N.edge` / `N.setEdge` accept `gradient`. Leading `@controls` metadata also works with this API.
 
 ## Included experiments and limits
 
 **Letter permutations** builds strings over an alphabet. With `ABC` and no repetition it creates six ordered two-letter strings and six ordered three-letter strings. `ABC` connects to the contiguous substrings `AB` and `BC`, not `AC`. Alphabet, length, repetition, and order are declared by that example's source. **Growing ring** builds a chain and closes its endpoints without prearranging a circle. **Modular residues** connects numbers by residue rules and can add explicit scaffold edges.
+
+The permutation example uses `N.palette(alphabet.length)` and assigns each node the colour of its **first letter**. `A`, `AB` and `ACB` therefore share a colour. Edges blend their endpoint colours. Alphabet characters are Unicode code points, not full grapheme clusters.
+
+Choose **Inputs → Birth order → branch-walk** for:
+
+```text
+A, AB, ABC, ACB, AC,
+B, BA, BAC, BCA, BC,
+C, CA, CAB, CBA, CB
+```
+
+This keeps starting-letter groups in alphabet order, visiting child subtrees alternately forward and backwards. Reversing a subtree puts its prefix last, which deliberately places `ACB` before `AC`. The rule generalises to other lengths and repeated letters. An edge waits until both of its nodes exist, then appears with the later node. Changing birth order preserves the final graph while changing its evolution. The layer-based `lexicographic`, `reverse` and seeded `shuffle` options remain available.
 
 The graph caps are 8,192 nodes and 250,000 edges. The worker also limits JavaScript heap memory to 64 MiB, stack memory to 512 KiB, generated event JSON to 16 MiB, and event count to 100,000. Source and parameter sizes, execution time, and instructions are bounded too. These limits interact: not every graph below the node/edge caps fits a plan.
 

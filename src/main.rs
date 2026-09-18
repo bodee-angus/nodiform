@@ -7,7 +7,11 @@ mod inputs;
 mod model;
 mod recording;
 mod rules;
+mod theme;
 mod timeline;
+
+#[cfg(test)]
+mod example_tests;
 
 fn main() -> eframe::Result {
     let mode = match diagnostics::LaunchMode::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
@@ -38,6 +42,7 @@ fn main() -> eframe::Result {
             [1500.0, 940.0]
         };
     let options = eframe::NativeOptions {
+        persist_window: smoke_test.is_none(),
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: wgpu_setup.into(),

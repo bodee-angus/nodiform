@@ -1,4 +1,4 @@
-// Nodiform Force v1: exact softened inverse-distance repulsion, weighted
+// Nodiform Force v2: exact softened inverse-distance repulsion, weighted
 // zero-rest springs, stiffness-limited overdamped Euler steps. No gravity or
 // collision. CPU supplies one shared dt=min(1/120,0.5/max weighted degree),
 // recomputed only when graph structure/strengths change. This attraction

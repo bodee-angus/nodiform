@@ -9,7 +9,7 @@ struct Edge {
     source: u32,
     target_index: u32,
     strength: f32,
-    _pad0: f32,
+    gradient: u32,
     color: vec4<f32>,
 }
 struct Camera { center: vec2<f32>, half_extent: vec2<f32> }
@@ -36,6 +36,7 @@ struct Vertex {
     @location(0) local_pixels: vec2<f32>,
     @location(1) @interpolate(flat) half_pixels: vec2<f32>,
     @location(2) @interpolate(flat) color: vec4<f32>,
+    @location(3) @interpolate(flat) end_color: vec4<f32>,
 }
 
 @vertex
@@ -50,6 +51,7 @@ fn node_vertex(@builtin(vertex_index) vertex: u32,
     output.local_pixels = local;
     output.half_pixels = vec2<f32>(radius_pixels);
     output.color = styles[index].color;
+    output.end_color = output.color;
     return output;
 }
 @fragment
@@ -79,10 +81,21 @@ fn edge_vertex(@builtin(vertex_index) vertex: u32,
     output.local_pixels = local;
     output.half_pixels = half_pixels;
     output.color = edge.color;
+    output.end_color = edge.color;
+    if edge.gradient != 0u {
+        // Node styles are already linear-light RGB. Sample live endpoint
+        // colours, preserving endpoint alpha and the edge colour's opacity.
+        output.color = vec4<f32>(styles[edge.source].color.rgb,
+            styles[edge.source].color.a * edge.color.a);
+        output.end_color = vec4<f32>(styles[edge.target_index].color.rgb,
+            styles[edge.target_index].color.a * edge.color.a);
+    }
     return output;
 }
 @fragment
 fn edge_fragment(input: Vertex) -> @location(0) vec4<f32> {
     let coverage = clamp(input.half_pixels + vec2<f32>(0.5) - abs(input.local_pixels), vec2<f32>(0.0), vec2<f32>(1.0));
-    return vec4<f32>(input.color.rgb, input.color.a * coverage.x * coverage.y);
+    let fraction = clamp(0.5 + input.local_pixels.x / max(2.0 * input.half_pixels.x, 0.000001), 0.0, 1.0);
+    let color = mix(input.color, input.end_color, fraction);
+    return vec4<f32>(color.rgb, color.a * coverage.x * coverage.y);
 }

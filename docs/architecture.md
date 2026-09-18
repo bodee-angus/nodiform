@@ -4,9 +4,9 @@ Nodiform separates the experiment, its playback, the GPU solver, and the encoder
 
 ## Rule compilation and the event model
 
-A separate process evaluates the source with QuickJS. It receives the source, inputs, and seed, then returns a bounded finite event plan or an error. The preferred `build(graph, p)` API collects additions into batches and flushes them at waits, updates, and function completion. Existing `function* generate(N, params)` programs can still emit events directly. Both produce the same validated event model. This keeps a stuck rule program from directly blocking the user interface and allows cancellation. Runtime limits are defence in depth, not a hardened operating-system sandbox for untrusted code. Manifests identify these semantics as `nodiform-rules-v2`; the legacy generator interface remains compatible.
+A separate process evaluates the source with QuickJS. It receives the source, inputs, and seed, then returns a bounded finite event plan or an error. The preferred `build(graph, p)` API collects additions into batches and flushes them at waits, updates, and function completion. Existing `function* generate(N, params)` programs can still emit events directly. Both produce the same validated event model. This keeps a stuck rule program from directly blocking the user interface and allows cancellation. Runtime limits are defence in depth, not a hardened operating-system sandbox for untrusted code. Manifests identify the current semantics as `nodiform-rules-v3`; the legacy generator interface remains compatible.
 
-An optional leading JSON `/* @controls {...} */` comment defines script-specific input controls. The application knows control types, not experiment families or special keys such as alphabet and node count. Defaults fill absent input keys; supplied values and undeclared keys are preserved. The Rules and Inputs tabs edit one experiment definition. The native egui interface uses light cards, rounded controls, and blue accents; it does not use Apple UI frameworks or implement system backdrop blur.
+An optional leading JSON `/* @controls {...} */` comment defines script-specific input controls. The application knows control types, not experiment families or special keys such as alphabet and node count. Defaults fill absent input keys; supplied values and undeclared keys are preserved. The Rules and Inputs tabs edit one experiment definition. The native egui interface supports System, Light and Dark themes. This application preference is persisted separately from project definitions and does not affect the offscreen graph renderer or video colours.
 
 The model validates stable IDs, colour values, finite numbers, endpoints, and graph size. A batch is transactional. Style and edge-strength changes are explicit events, so their place in the sequence is reproducible. Validation applies the plan to a model before the live run starts.
 
@@ -18,6 +18,8 @@ Node positions live in GPU buffers. Graph updates append birth positions and upd
 
 Repulsion is evaluated over all pairs with short-distance softening. Attraction is gathered from incident edges using their current nonnegative strengths. Springs have zero rest length. Motion is overdamped and limited per step for numerical stability. There is no hidden gravity or centring force.
 
+`nodiform-force-v2` uses repulsion 1024, softening squared 0.25, maximum displacement 2 per tick, and default edge strength 4. These increase repulsion 16-fold and default attraction 4-fold over version 0.1.2. Explicit script strengths are honoured. For an isolated pair with one edge of strength `s > 0`, a nonzero equilibrium satisfies `distance² = 1024 / s − 0.25`, when positive. This pair calculation does not predict the edge lengths of a general graph. Previously saved experiments run with the new force model; manifests record its version and coefficients.
+
 The numerical mobility per tick is `min(1/120, 0.5 / maximum incident strength sum)`, using `1/120` when there is no positive attraction. Increasing edge weights can therefore reduce the step size for the whole graph. This is a stability precaution for the force update, not a change to video frame rate or event scheduling. The displacement cap remains a separate safeguard; neither guarantees monotonic energy descent.
 
 The exact all-pairs calculation costs O(N²) for repulsion. Edge attraction uses adjacency data rather than a dense edge matrix. The current caps of 8,192 nodes and 250,000 edges bound resource use; GPU buffers reserve these capacities at initialisation. They are not throughput targets. A future approximate solver would need explicit accuracy and reproducibility controls rather than silently replacing this model.
@@ -25,6 +27,12 @@ The exact all-pairs calculation costs O(N²) for repulsion. Edge attraction uses
 Generation retains the full finite plan before playback. Its separate limits include a 64 MiB QuickJS heap, a 512 KiB stack, 16 MiB of generated event JSON, and 100,000 events, along with instruction/time budgets. A graph within the model caps can exceed these generation limits. The supplied complete-growth experiment fits 500 nodes and 124,750 edges, but dense rendering and exact repulsion still impose a substantial runtime cost.
 
 The shader renders edges and antialiased circular nodes. Node radii are world-space sizes. The camera derives a frame from the graph bounds, including node radii and a margin. Changing that frame affects presentation, not forces or stored positions.
+
+Gradient edges sample the live node-style buffer at both endpoints and interpolate linear-light RGB and alpha along their length. The edge colour's alpha multiplies the endpoint alpha; its RGB is ignored in gradient mode. A later node colour change therefore updates connected gradients without rewriting edge events. Solid colour remains the default for older edges. Preview and recording use the same render pipeline.
+
+## Perceptual palettes
+
+`graph.palette(count)` and `N.palette(count)` are bundled offline helpers returning sRGB hex strings. The implementation uses [Oklab](https://bottosson.github.io/posts/oklab/) and its cylindrical OKLCH form, with gamut checks for conversion into sRGB. It favours high chroma and separates small categorical palettes using greedy minimum-distance selection in Oklab. Large palettes extend deterministically with unique hex codes; finite colour space cannot keep arbitrarily many categories visually distinct. The helper does not draw from the experiment's random stream. Its version is covered by the rule API version.
 
 ## Connection-based node sizing
 

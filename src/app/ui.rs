@@ -1,64 +1,13 @@
 use super::*;
 
-const SURFACE: egui::Color32 = egui::Color32::from_rgb(240, 243, 249);
-const INK: egui::Color32 = egui::Color32::from_rgb(29, 37, 54);
-const LINE: egui::Color32 = egui::Color32::from_rgb(218, 225, 236);
+use crate::theme::Palette;
+
 const CANVAS: egui::Color32 = egui::Color32::from_rgb(10, 18, 24);
 
-pub(super) fn configure(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::light();
-    visuals.panel_fill = SURFACE;
-    visuals.window_fill = egui::Color32::from_rgba_unmultiplied(250, 252, 255, 250);
-    visuals.extreme_bg_color = egui::Color32::from_rgb(248, 250, 254);
-    visuals.faint_bg_color = egui::Color32::from_rgb(231, 237, 246);
-    visuals.override_text_color = Some(INK);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(206, 226, 255);
-    visuals.selection.stroke.color = INK;
-    visuals.hyperlink_color = ACCENT;
-    visuals.window_corner_radius = 22.into();
-    visuals.window_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, LINE);
-    visuals.widgets.noninteractive.fg_stroke.color = INK;
-    for widget in [
-        &mut visuals.widgets.inactive,
-        &mut visuals.widgets.hovered,
-        &mut visuals.widgets.active,
-        &mut visuals.widgets.open,
-    ] {
-        widget.corner_radius = 12.into();
-        widget.fg_stroke.color = INK;
-        widget.bg_stroke = egui::Stroke::new(1.0_f32, LINE);
-    }
-    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(251, 252, 255);
-    visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(251, 252, 255);
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(226, 236, 252);
-    visuals.widgets.hovered.weak_bg_fill = visuals.widgets.hovered.bg_fill;
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(210, 228, 254);
-    visuals.widgets.active.weak_bg_fill = visuals.widgets.active.bg_fill;
-    ctx.set_visuals(visuals);
-    ctx.style_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(10.0, 9.0);
-        style.spacing.button_padding = egui::vec2(16.0, 9.0);
-        style.spacing.interact_size.y = 32.0;
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Heading, egui::FontId::proportional(22.0));
-    });
-}
-
-fn card() -> egui::Frame {
+fn card(p: Palette) -> egui::Frame {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 225))
-        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::WHITE))
+        .fill(p.card)
+        .stroke(egui::Stroke::new(1.0_f32, p.line))
         .corner_radius(20)
         .inner_margin(16)
 }
@@ -68,28 +17,30 @@ fn button(text: &str) -> egui::Button<'_> {
 }
 
 fn logo(ui: &mut egui::Ui) {
+    let p = Palette::for_ui(ui);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(38.0, 38.0), egui::Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 12, egui::Color32::WHITE);
+    painter.rect_filled(rect, 12, p.card);
     let points = [
         rect.min + egui::vec2(11.0, 12.0),
         rect.min + egui::vec2(28.0, 18.0),
         rect.min + egui::vec2(15.0, 29.0),
     ];
     for (a, b) in [(0, 1), (1, 2), (2, 0)] {
-        painter.line_segment([points[a], points[b]], egui::Stroke::new(1.7_f32, ACCENT));
+        painter.line_segment([points[a], points[b]], egui::Stroke::new(1.7_f32, p.accent));
     }
     for point in points {
-        painter.circle_filled(point, 3.5, ACCENT);
+        painter.circle_filled(point, 3.5, p.accent);
     }
 }
 
 impl NodiformApp {
     pub(super) fn toolbar(&mut self, ctx: &egui::Context) {
+        let p = Palette::for_ctx(ctx);
         egui::TopBottomPanel::top("header")
             .frame(
                 egui::Frame::new()
-                    .fill(SURFACE)
+                    .fill(p.surface)
                     .inner_margin(egui::Margin::symmetric(22, 16)),
             )
             .show(ctx, |ui| {
@@ -100,7 +51,7 @@ impl NodiformApp {
                         ui.label(
                             egui::RichText::new("A place for emergent ideas")
                                 .size(11.0)
-                                .color(MUTED),
+                                .color(p.secondary),
                         );
                     });
                     ui.add_space(14.0);
@@ -153,7 +104,7 @@ impl NodiformApp {
                                     egui::RichText::new("Preview").color(egui::Color32::WHITE),
                                 )
                                 .corner_radius(100)
-                                .fill(ACCENT)
+                                .fill(p.action)
                                 .stroke(egui::Stroke::NONE),
                             )
                             .on_hover_text("Run without recording · Ctrl+Enter")
@@ -174,32 +125,41 @@ impl NodiformApp {
     }
 
     pub(super) fn side_panel(&mut self, ctx: &egui::Context) {
+        let p = Palette::for_ctx(ctx);
         let enabled = !self.busy();
         egui::SidePanel::left("rules")
             .resizable(true)
             .default_width((ctx.screen_rect().width() * 0.38).clamp(420.0, 570.0))
             .width_range(420.0..=900.0)
-            .frame(egui::Frame::new().fill(SURFACE).inner_margin(egui::Margin {
-                left: 22,
-                right: 10,
-                top: 0,
-                bottom: 12,
-            }))
+            .frame(
+                egui::Frame::new()
+                    .fill(p.surface)
+                    .inner_margin(egui::Margin {
+                        left: 22,
+                        right: 10,
+                        top: 0,
+                        bottom: 12,
+                    }),
+            )
             .show(ctx, |ui| {
-                card().show(ui, |ui| {
+                card(p).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Experiment").size(20.0).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new("JavaScript").size(12.0).color(MUTED));
+                            ui.label(
+                                egui::RichText::new("JavaScript")
+                                    .size(12.0)
+                                    .color(p.secondary),
+                            );
                         });
                     });
                     ui.label(
                         egui::RichText::new("Describe what happens. Explore what emerges.")
-                            .color(MUTED),
+                            .color(p.secondary),
                     );
                     ui.add_space(8.0);
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(233, 238, 247))
+                        .fill(p.inset)
                         .corner_radius(12)
                         .inner_margin(3)
                         .show(ui, |ui| {
@@ -212,13 +172,13 @@ impl NodiformApp {
                                         .add(
                                             egui::Button::new(
                                                 egui::RichText::new(label).color(if selected {
-                                                    INK
+                                                    p.ink
                                                 } else {
-                                                    MUTED
+                                                    p.secondary
                                                 }),
                                             )
                                             .fill(if selected {
-                                                egui::Color32::WHITE
+                                                p.selected
                                             } else {
                                                 egui::Color32::TRANSPARENT
                                             })
@@ -252,13 +212,18 @@ impl NodiformApp {
     }
 
     pub(super) fn canvas(&mut self, ctx: &egui::Context) {
+        let p = Palette::for_ctx(ctx);
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(SURFACE).inner_margin(egui::Margin {
-                left: 10,
-                right: 22,
-                top: 0,
-                bottom: 12,
-            }))
+            .frame(
+                egui::Frame::new()
+                    .fill(p.surface)
+                    .inner_margin(egui::Margin {
+                        left: 10,
+                        right: 22,
+                        top: 0,
+                        bottom: 12,
+                    }),
+            )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Simulation").size(20.0).strong());
@@ -269,12 +234,16 @@ impl NodiformApp {
                     } else {
                         "Ready"
                     };
-                    ui.label(egui::RichText::new(state).size(12.0).color(MUTED));
+                    ui.label(egui::RichText::new(state).size(12.0).color(p.secondary));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(button("Inspect")).clicked() {
                             self.show_inspector = !self.show_inspector;
                         }
-                        ui.label(egui::RichText::new("2D · Auto fit").size(12.0).color(MUTED));
+                        ui.label(
+                            egui::RichText::new("2D · Auto fit")
+                                .size(12.0)
+                                .color(p.secondary),
+                        );
                     });
                 });
                 ui.add_space(6.0);
@@ -322,7 +291,7 @@ impl NodiformApp {
                 }
                 ui.add_space(10.0);
                 let narrow = ui.available_width() < 600.0;
-                card().show(ui, |ui| {
+                card(p).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for (number, label) in [
                             (self.graph.nodes.len() as u64, "Nodes"),
@@ -333,7 +302,7 @@ impl NodiformApp {
                                 ui.label(
                                     egui::RichText::new(number.to_string()).size(22.0).strong(),
                                 );
-                                ui.label(egui::RichText::new(label).size(11.0).color(MUTED));
+                                ui.label(egui::RichText::new(label).size(11.0).color(p.secondary));
                             });
                             ui.add_space(22.0);
                         }
@@ -383,10 +352,11 @@ impl NodiformApp {
     }
 
     pub(super) fn status_bar(&self, ctx: &egui::Context) {
+        let p = Palette::for_ctx(ctx);
         egui::TopBottomPanel::bottom("status")
             .frame(
                 egui::Frame::new()
-                    .fill(SURFACE)
+                    .fill(p.surface)
                     .inner_margin(egui::Margin::symmetric(24, 9)),
             )
             .show(ctx, |ui| {
@@ -395,11 +365,15 @@ impl NodiformApp {
                         .id_salt("error_details")
                         .max_height(90.0)
                         .show(ui, |ui| {
-                            ui.colored_label(egui::Color32::from_rgb(179, 48, 59), error);
+                            ui.colored_label(p.error, error);
                         });
                 }
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(&self.status).size(12.0).color(MUTED));
+                    ui.label(
+                        egui::RichText::new(&self.status)
+                            .size(12.0)
+                            .color(p.secondary),
+                    );
                     if let Some(recorder) = &self.recorder {
                         ui.label(
                             egui::RichText::new(format!(
@@ -412,7 +386,7 @@ impl NodiformApp {
                                 }
                             ))
                             .size(12.0)
-                            .color(ACCENT),
+                            .color(p.accent),
                         )
                         .on_hover_text(recorder.directory().display().to_string());
                     }
@@ -421,21 +395,39 @@ impl NodiformApp {
     }
 
     pub(super) fn settings(&mut self, ctx: &egui::Context) {
+        let p = Palette::for_ctx(ctx);
         if !self.show_settings {
             return;
         }
         let mut open = self.show_settings;
         let mut done = false;
-        egui::Window::new("Settings").open(&mut open).title_bar(false).resizable(false).frame(card().fill(egui::Color32::from_rgb(250, 252, 255)).inner_margin(20)).default_width(390.0).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 90.0)).show(ctx, |ui| {
+        egui::Window::new("Settings").open(&mut open).title_bar(false).resizable(false).frame(card(p).fill(p.window).inner_margin(20)).default_width(390.0).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 90.0)).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Settings").size(22.0).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(egui::RichText::new("Done").color(ACCENT)).clicked() { done = true; }
+                    if ui.button(egui::RichText::new("Done").color(p.accent)).clicked() { done = true; }
                 });
             });
             ui.add_space(12.0);
             egui::ScrollArea::vertical().max_height((ctx.screen_rect().height() - 235.0).max(200.0)).show(ui, |ui| {
                 ui.label(egui::RichText::new("Appearance").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Theme");
+                    let before = self.theme_preference;
+                    for (value, label) in [
+                        (egui::ThemePreference::System, "System"),
+                        (egui::ThemePreference::Light, "Light"),
+                        (egui::ThemePreference::Dark, "Dark"),
+                    ] {
+                        ui.selectable_value(&mut self.theme_preference, value, label);
+                    }
+                    if self.theme_preference != before {
+                        ctx.set_theme(self.theme_preference);
+                        ctx.request_repaint();
+                    }
+                });
+                ui.label(egui::RichText::new("System follows your desktop appearance. The graph and recorded video keep their own colours.").size(12.0).color(p.secondary));
+                ui.add_space(8.0);
                 let recording = self.pending_run.as_ref().is_some_and(|(intent, _)| *intent == Intent::Record) || self.recorder.is_some() || self.recorder_start.is_some() || self.finishing;
                 let sizing_changed = ui.add_enabled_ui(!recording, |ui| {
                     ui.horizontal(|ui| {
@@ -455,14 +447,14 @@ impl NodiformApp {
                     let (width, height) = self.gpu.dimensions();
                     self.gpu.render(width, height);
                 }
-                ui.label(egui::RichText::new("Connection count changes appearance only. Node sizes still follow the zoom level.").size(12.0).color(MUTED));
+                ui.label(egui::RichText::new("Connection count changes appearance only. Node sizes still follow the zoom level.").size(12.0).color(p.secondary));
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_enabled_ui(!self.busy(), |ui| {
                     ui.label(egui::RichText::new("Simulation").strong());
                     ui.horizontal(|ui| { ui.label("Random seed"); ui.add(egui::DragValue::new(&mut self.project.seed)); });
                     ui.horizontal(|ui| { ui.label("Final settling ticks"); ui.add(egui::DragValue::new(&mut self.project.tail_ticks).range(0..=10_000_000)); });
-                    ui.label(egui::RichText::new("Repulsion and edge attraction. No central gravity.").size(12.0).color(MUTED));
+                    ui.label(egui::RichText::new("Repulsion and edge attraction. No central gravity.").size(12.0).color(p.secondary));
                     ui.add_space(10.0);
                     ui.separator();
                     ui.label(egui::RichText::new("Recording").strong());
@@ -478,13 +470,13 @@ impl NodiformApp {
                         ui.selectable_value(&mut self.project.recording.codec, "h264_nvenc".into(), "H.264 · NVIDIA");
                     });
                     if ui.button("Choose video folder…").clicked() { if let Some(path) = rfd::FileDialog::new().pick_folder() { self.output_dir = path; } }
-                    ui.label(egui::RichText::new(self.output_dir.display().to_string()).size(12.0).color(MUTED));
-                    ui.label(egui::RichText::new("Recording requires FFmpeg on this computer.").size(12.0).color(MUTED));
+                    ui.label(egui::RichText::new(self.output_dir.display().to_string()).size(12.0).color(p.secondary));
+                    ui.label(egui::RichText::new("Recording requires FFmpeg on this computer.").size(12.0).color(p.secondary));
                 });
                 ui.add_space(10.0);
                 ui.separator();
-                ui.label(egui::RichText::new(&self.adapter).size(11.0).color(MUTED));
-                ui.label(egui::RichText::new(format!("Nodiform {} · Experimental alpha", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED));
+                ui.label(egui::RichText::new(&self.adapter).size(11.0).color(p.secondary));
+                ui.label(egui::RichText::new(format!("Nodiform {} · Experimental alpha", env!("CARGO_PKG_VERSION"))).size(11.0).color(p.secondary));
             });
         });
         self.show_settings = open && !done;

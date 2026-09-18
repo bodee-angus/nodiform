@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-pub const RULE_API_VERSION: &str = "nodiform-rules-v2";
+pub const RULE_API_VERSION: &str = "nodiform-rules-v3";
 pub const MAX_EVENTS: usize = 100_000;
 const MAX_SOURCE_BYTES: usize = 1_048_576;
 const MAX_PARAMETER_BYTES: usize = 262_144;
@@ -92,7 +92,8 @@ pub fn compile_source(source: &str, parameters: Value, seed: u32) -> Result<Plan
 
 // User code executes in a separate Function scope and cannot access the runner's counters.
 // Yields and builder operations are snapshotted so later mutation cannot rewrite history.
-const RUNNER: &str = r#"
+const RUNNER: &str = concat!(
+    r#"
 (() => {
     'use strict';
     const source = globalThis.__nodiform_source;
@@ -130,8 +131,13 @@ const RUNNER: &str = r#"
     }
     define(Math, 'random', { value: undefined, configurable: false, writable: false });
     freeze(Math);
+    const palette =
+"#,
+    include_str!("palette.js"),
+    r#";
     let nextEdge = 0;
     const N = freeze({
+        palette,
         node(id, options = {}) { return { ...options, id }; },
         edge(source, target, options = {}) {
             return { id: `edge:${nextEdge++}`, ...options, source, target };
@@ -222,7 +228,8 @@ const RUNNER: &str = r#"
         wait(ticks) { flush(); emit(N.wait(ticks)); },
         setNode(value, options = {}) { flush(); emit(N.setNode(id(value), options)); },
         setEdge(value, options = {}) { flush(); emit(N.setEdge(id(value), options)); },
-        random: N.random
+        random: N.random,
+        palette
     });
     const factory = new Function('N', 'params', '"use strict";\n' + source +
         '\nif (typeof generate === "function") return {builder:false,entry:generate};' +
@@ -253,7 +260,8 @@ const RUNNER: &str = r#"
     }
     return '[' + join(encoded, ',') + ']';
 })()
-"#;
+"#
+);
 
 #[derive(Serialize, Deserialize)]
 struct WorkerRequest {
@@ -409,6 +417,119 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn palette_colours(count: usize) -> Vec<String> {
+        let plan = compile_source(
+            "function build(graph, p) { graph.palette(p.count).forEach((color, id) => graph.add(id, {color})); }",
+            json!({"count": count}),
+            1,
+        ).unwrap();
+        plan.events
+            .into_iter()
+            .flat_map(|event| match event {
+                Event::Batch { nodes, .. } => nodes.into_iter().map(|node| node.color).collect(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn palettes_return_unique_hex_colours_up_to_the_node_limit() {
+        assert!(palette_colours(0).is_empty());
+        let colours = palette_colours(crate::model::MAX_NODES);
+        assert_eq!(colours.len(), crate::model::MAX_NODES);
+        assert!(colours.iter().all(|colour| {
+            colour.len() == 7
+                && colour.starts_with('#')
+                && colour.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+        }));
+        let unique = colours.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), colours.len());
+        assert_eq!(&colours[..12], palette_colours(12));
+        assert_eq!(&colours[..3], palette_colours(3));
+    }
+
+    #[test]
+    fn palette_is_shared_by_both_apis_and_does_not_consume_randomness() {
+        let baseline = compile_source(
+            "function build(graph) { graph.add('a', {radius: graph.random() + 1}); graph.add('b', {radius: graph.random() + 1}); }",
+            json!({}), 42,
+        ).unwrap();
+        let source = r#"function build(graph) {
+            graph.add('a', {radius: graph.random() + 1});
+            const colours = graph.palette(12);
+            const unchanged = N.palette(12);
+            if (JSON.stringify(colours) !== JSON.stringify(unchanged)) throw new Error('API mismatch');
+            colours[0] = '#000000';
+            colours.length = 0;
+            if (JSON.stringify(graph.palette(12)) !== JSON.stringify(unchanged)) throw new Error('Mutated cache');
+            graph.add('b', {radius: graph.random() + 1});
+        }"#;
+        assert_eq!(baseline, compile_source(source, json!({}), 42).unwrap());
+        let legacy = "function* generate(N) { yield N.batch(N.palette(12).map((color, i) => N.node(String(i), {color}))); }";
+        assert_eq!(
+            compile_source(legacy, json!({}), 19).unwrap(),
+            compile_source(legacy, json!({}), 42).unwrap()
+        );
+    }
+
+    #[test]
+    fn palette_rejects_invalid_counts_without_coercion() {
+        for count in [
+            "-1",
+            "8193",
+            "1.5",
+            "NaN",
+            "Infinity",
+            "'3'",
+            "null",
+            "undefined",
+            "{}",
+        ] {
+            let source = format!("function build(graph) {{ graph.palette({count}); }}");
+            assert!(compile_source(&source, json!({}), 1)
+                .unwrap_err()
+                .contains("palette(count) requires an integer from 0 to 8192"));
+        }
+    }
+
+    #[test]
+    fn small_palettes_are_vivid_and_perceptually_separated() {
+        // Measure the actual quantised sRGB outputs in Oklab, rather than
+        // accepting generated hue labels as evidence of perceptual separation.
+        fn oklab(hex: &str) -> [f64; 3] {
+            let linear = |index| {
+                let value =
+                    f64::from(u8::from_str_radix(&hex[index..index + 2], 16).unwrap()) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            let [r, g, b] = [linear(1), linear(3), linear(5)];
+            let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
+            let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
+            let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();
+            [
+                0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+                1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+                0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+            ]
+        }
+        let colours: Vec<_> = palette_colours(12)
+            .iter()
+            .map(|colour| oklab(colour))
+            .collect();
+        for (index, colour) in colours.iter().enumerate() {
+            assert!((0.63..=0.83).contains(&colour[0]));
+            assert!(colour[1].hypot(colour[2]) > 0.10);
+            for other in &colours[..index] {
+                let squared: f64 = colour.iter().zip(other).map(|(a, b)| (a - b).powi(2)).sum();
+                assert!(squared.sqrt() > 0.13);
+            }
+        }
+    }
+
     #[test]
     fn complete_growth_connects_each_birth_to_all_previous_nodes() {
         let plan = compile_source(
@@ -434,7 +555,7 @@ mod tests {
                 assert_eq!(edge.source, id);
                 assert_eq!(edge.target, (target + 1).to_string());
                 assert_ne!(edge.source, edge.target);
-                assert_eq!(edge.strength, 1.0);
+                assert_eq!(edge.strength, crate::model::DEFAULT_EDGE_STRENGTH);
             }
             assert_eq!(birth[1], Event::Wait { ticks: 6 });
         }

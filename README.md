@@ -2,13 +2,15 @@
 
 A native laboratory for emergent graphs. Write rules, choose the order in which a graph grows, and watch its structure develop in two dimensions.
 
-Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.2 gives experiments a general rule API, optional inputs declared by their own scripts, and a redesigned interface. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding.
+Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.3 adds dark mode, stronger forces, perceptual colour palettes, and live endpoint-gradient edges. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
 
 ## What this version does
 
 - Runs editable JavaScript rules that create nodes and edges in a precise sequence.
 - Builds optional input controls from each script, without assuming an alphabet, node count, or graph family.
 - Applies code-defined colours, world-space node radii, and edge strengths, including changes later in a run.
+- Generates vivid hex palettes in a perceptual colour space with `graph.palette(count)` or `N.palette(count)`.
+- Blends gradient edges between their endpoint colours, following later node colour changes.
 - Calculates repulsion and weighted attraction on the GPU, and renders the graph on the GPU.
 - Fits the whole graph into the view. Nodes become smaller on screen as the camera zooms out.
 - Provides a syntax-coloured rule editor, line numbers, snippets, starter examples, and an in-app API reference.
@@ -17,7 +19,7 @@ Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. 
 
 The default experiment is a small eight-node chain with no required inputs. **Experiment → Examples** contains a graph in which each new node connects to every earlier node, letter permutations, a growing ring, and modular residues. The complete-growth example creates 500 nodes and 124,750 edges. These are editable experiments, not fixed application modes.
 
-The native egui interface uses light cards, rounded controls, and blue accents around a dark simulation canvas. Its appearance does not depend on Apple frameworks or a system backdrop-blur effect.
+The native egui interface offers **Settings → Appearance → System / Light / Dark**, with matching editor colours and controls. The theme is remembered separately from experiments and does not change recorded graph colours. Rounded cards and blue accents surround a dark simulation canvas.
 
 ## Run the desktop app
 
@@ -85,6 +87,8 @@ The archive also includes an optional desktop-entry template. Its `Exec=nodiform
 The first solver evaluates every pair of nodes, so repulsion costs **O(N²)** per tick. This build limits graphs to **8,192 nodes and 250,000 edges**, with GPU buffers reserved for those capacities. Those are validation limits, not a promise of interactive frame rates. Dense graphs can be expensive well below them. The rule worker has a 64 MiB JavaScript heap limit and a 16 MiB generated event-JSON limit; a large experiment can hit either before reaching the graph caps.
 
 Forces consist of softened repulsion and weighted zero-rest-length attraction. There is no centring gravity. The camera follows the graph without applying a force to it. Disconnected attraction components can therefore drift apart indefinitely. Zero-strength edges do not hold components together.
+
+Version 0.1.3 raises the repulsion coefficient from 64 to 1024 and the default edge strength from 1 to 4. Explicit strengths in saved scripts remain unchanged; every run uses the new repulsion. For one isolated default-strength edge, the equilibrium separation is about twice its previous value. Auto-fit still frames the whole graph, so greater world-space separation also makes fixed-radius nodes appear smaller.
 
 The solver seeks relaxed configurations but does not promise a global minimum, monotonic energy reduction on every discrete step, or identical floating-point trajectories across different GPUs and drivers. The creation order and waits are deliberate parts of an experiment. See [architecture and scientific caveats](docs/architecture.md).
 

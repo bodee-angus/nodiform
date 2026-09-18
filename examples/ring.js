@@ -9,20 +9,20 @@
 function* generate(N, params) {
     const count = params.count ?? 80;
     const ticks = params.ticksPerNode ?? 12;
-    const colors = ["#89b4fa", "#cba6f7", "#a6e3a1", "#fab387", "#f5c2e7"];
     if (!Number.isInteger(count) || count < 1 || count > 8192) {
         throw new Error("count must be an integer from 1 to 8192");
     }
+    const colors = N.palette(Math.min(count, 8));
     for (let n = 0; n < count; n++) {
         const edges = [];
         if (n > 0) {
             edges.push(N.edge(String(n - 1), String(n), {
-                id: `link:${n}`, color: "#7f8fa6b0", strength: 1
+                id: `link:${n}`, gradient: true, color: "#ffffffcc", strength: 4
             }));
         }
         if (n === count - 1 && count > 2) {
             edges.push(N.edge(String(n), "0", {
-                id: "closure", color: "#89dcebd0", strength: 1
+                id: "closure", gradient: true, color: "#ffffffcc", strength: 4
             }));
         }
         yield N.batch([N.node(String(n), {

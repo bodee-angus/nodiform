@@ -2,20 +2,15 @@
 use crate::experiment::{
     parse_controls, validate_parameters, validate_value, ControlKind, ControlSpec,
 };
+use crate::theme::Palette;
 use eframe::egui::{self, Color32, RichText};
 use serde_json::Value;
-
-const TEXT: Color32 = Color32::from_rgb(32, 37, 54);
-const SECONDARY: Color32 = Color32::from_rgb(105, 114, 132);
-const BLUE: Color32 = Color32::from_rgb(0, 122, 255);
-const ERROR: Color32 = Color32::from_rgb(183, 49, 57);
 
 /// Optional controls are declared in the script. Merely viewing a default never
 /// changes the stored JSON; changing a field preserves every other parameter.
 pub fn show(ui: &mut egui::Ui, source: &str, parameters_text: &mut String, enabled: bool) {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-        ui.visuals_mut().override_text_color = Some(TEXT);
         egui::ScrollArea::vertical()
             .id_salt("script-inputs-scroll")
             .auto_shrink([false, false])
@@ -121,7 +116,7 @@ fn control_card(
         ui.horizontal(|ui| {
             ui.label(RichText::new(&spec.label).size(14.0).strong());
             if !explicit {
-                ui.label(RichText::new("Default").size(11.0).color(SECONDARY));
+                ui.label(RichText::new("Default").size(11.0).color(Palette::for_ui(ui).secondary));
             }
         });
         if let Some(description) = &spec.description {
@@ -135,11 +130,11 @@ fn control_card(
             ui.button("Use default").clicked().then_some(ControlAction::Clear)
         };
         if let Err(error) = validation {
-            ui.label(RichText::new(format!("{name}: {error}")).size(12.0).color(ERROR));
+            ui.label(RichText::new(format!("{name}: {error}")).size(12.0).color(Palette::for_ui(ui).error));
         }
         if explicit {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("params.{name}")).monospace().size(11.0).color(SECONDARY));
+                ui.label(RichText::new(format!("params.{name}")).monospace().size(11.0).color(Palette::for_ui(ui).secondary));
                 if ui.small_button("Reset value").on_hover_text("Use the default declared in this script.").clicked() {
                     action = Some(ControlAction::Clear);
                 }
@@ -315,7 +310,7 @@ fn string_field(
                         "Not applied: {error}. Correct this value to update the input."
                     ))
                     .size(12.0)
-                    .color(ERROR),
+                    .color(Palette::for_ui(ui).error),
                 );
             }
             None
@@ -371,7 +366,7 @@ fn json_field(ui: &mut egui::Ui, current: &Value, explicit: bool) -> Option<Valu
                     "Not applied: {error}. Correct this JSON to update the input."
                 ))
                 .size(12.0)
-                .color(ERROR),
+                .color(Palette::for_ui(ui).error),
             );
         }
         _ => {}
@@ -391,9 +386,9 @@ pub(crate) fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::
     });
     let amount = ui.ctx().animate_bool(response.id, *value);
     let fill = if *value {
-        BLUE
+        Palette::for_ui(ui).action
     } else {
-        Color32::from_rgb(214, 219, 228)
+        Palette::for_ui(ui).switch_off
     };
     ui.painter().rect_filled(rect, 13.0, fill);
     let center = egui::pos2(
@@ -405,7 +400,7 @@ pub(crate) fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::
         ui.painter().rect_stroke(
             rect.expand(2.0),
             15.0,
-            egui::Stroke::new(1.5_f32, BLUE),
+            egui::Stroke::new(1.5_f32, Palette::for_ui(ui).action),
             egui::StrokeKind::Outside,
         );
     }
@@ -414,8 +409,8 @@ pub(crate) fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::
 
 fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
     egui::Frame::new()
-        .fill(Color32::from_rgb(255, 255, 254))
-        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(226, 231, 239)))
+        .fill(Palette::for_ui(ui).card)
+        .stroke(egui::Stroke::new(1.0_f32, Palette::for_ui(ui).line))
         .corner_radius(16)
         .inner_margin(16.0)
         .show(ui, |ui| {
@@ -425,13 +420,25 @@ fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> egui::In
 }
 
 fn secondary(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(12.0).color(SECONDARY));
+    ui.label(
+        RichText::new(text)
+            .size(12.0)
+            .color(Palette::for_ui(ui).secondary),
+    );
 }
 
 fn issue(ui: &mut egui::Ui, title: &str, detail: &str) {
     card(ui, |ui| {
-        ui.label(RichText::new(title).strong().color(ERROR));
-        ui.label(RichText::new(detail).size(12.0).color(ERROR));
+        ui.label(
+            RichText::new(title)
+                .strong()
+                .color(Palette::for_ui(ui).error),
+        );
+        ui.label(
+            RichText::new(detail)
+                .size(12.0)
+                .color(Palette::for_ui(ui).error),
+        );
     });
 }
 

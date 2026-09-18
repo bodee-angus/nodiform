@@ -7,6 +7,13 @@ pub const MAX_NODES: usize = 8_192;
 // useful for dense experiments as well as sparse growth rules.
 pub const MAX_EDGES: usize = 250_000;
 pub const BIRTH_PLACEMENT_VERSION: &str = "seeded-id-jitter-v1";
+/// Pinned force parameters shared by the solver, defaults and recording metadata.
+pub const FORCE_VERSION: &str = "nodiform-force-v2";
+pub const REPULSION: f32 = 1024.0;
+pub const DEFAULT_EDGE_STRENGTH: f32 = 4.0;
+pub const SOFTENING_SQUARED: f32 = 0.25;
+pub const MAX_DISPLACEMENT: f32 = 2.0;
+pub const BASE_TIMESTEP: f32 = 1.0 / 120.0;
 /// Domain limits keep finite user inputs within the GPU solver's numeric range.
 pub const MAX_NUMERIC_MAGNITUDE: f32 = 1_000_000.0;
 
@@ -27,6 +34,8 @@ pub struct Edge {
     pub target: usize,
     pub color: [f32; 4],
     pub strength: f32,
+    #[serde(default)]
+    pub gradient: bool,
 }
 
 fn default_node_color() -> String {
@@ -39,7 +48,7 @@ fn default_radius() -> f32 {
     1.6
 }
 fn default_strength() -> f32 {
-    1.0
+    DEFAULT_EDGE_STRENGTH
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -66,6 +75,8 @@ pub struct EdgeSpec {
     pub color: String,
     #[serde(default = "default_strength")]
     pub strength: f32,
+    #[serde(default)]
+    pub gradient: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -93,6 +104,8 @@ pub enum Event {
         color: Option<String>,
         #[serde(default)]
         strength: Option<f32>,
+        #[serde(default)]
+        gradient: Option<bool>,
     },
 }
 
@@ -154,6 +167,7 @@ impl Graph {
                 id,
                 color,
                 strength,
+                gradient,
             } => {
                 let &index = self
                     .edge_indices
@@ -169,6 +183,9 @@ impl Graph {
                 }
                 if let Some(strength) = strength {
                     edge.strength = *strength;
+                }
+                if let Some(gradient) = gradient {
+                    edge.gradient = *gradient;
                 }
                 Ok(())
             }
@@ -241,6 +258,7 @@ impl Graph {
                 target: lookup(&spec.target)?,
                 color: parse_color(&spec.color)?,
                 strength: spec.strength,
+                gradient: spec.gradient,
             });
         }
 
@@ -358,8 +376,64 @@ mod tests {
             target: target.into(),
             color: default_edge_color(),
             strength: 1.0,
+            gradient: false,
         }
     }
+    #[test]
+    fn edge_defaults_preserve_solid_appearance_and_raise_new_attraction() {
+        let edge: EdgeSpec =
+            serde_json::from_str(r##"{"id":"e","source":"a","target":"b"}"##).unwrap();
+        assert_eq!(edge.strength, DEFAULT_EDGE_STRENGTH);
+        assert!(!edge.gradient);
+        let old: EdgeSpec =
+            serde_json::from_str(r##"{"id":"e","source":"a","target":"b","strength":1}"##).unwrap();
+        assert_eq!(old.strength, 1.0, "Explicit old strengths remain unchanged");
+        assert!(serde_json::from_str::<EdgeSpec>(
+            r##"{"id":"e","source":"a","target":"b","gradient":"yes"}"##
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn gradients_are_optional_mutable_and_updates_are_atomic() {
+        let mut graph = Graph::new(42);
+        let mut link = edge("e", "a", "b");
+        link.gradient = true;
+        graph
+            .apply(&Event::Batch {
+                nodes: vec![node("a"), node("b")],
+                edges: vec![link],
+            })
+            .unwrap();
+        assert!(graph.edges[0].gradient);
+        let before = graph.edges[0].clone();
+        assert!(graph
+            .apply(&Event::SetEdge {
+                id: "e".into(),
+                color: Some("invalid".into()),
+                strength: Some(2.0),
+                gradient: Some(false),
+            })
+            .is_err());
+        assert_eq!(graph.edges[0], before);
+        graph
+            .apply(&Event::SetEdge {
+                id: "e".into(),
+                color: None,
+                strength: None,
+                gradient: Some(false),
+            })
+            .unwrap();
+        assert!(!graph.edges[0].gradient);
+        assert_eq!(graph.edges[0].strength, before.strength);
+        assert_eq!(graph.edges[0].color, before.color);
+        let legacy: Event =
+            serde_json::from_str(r##"{"op":"set_edge","id":"e","strength":2}"##).unwrap();
+        graph.apply(&legacy).unwrap();
+        assert!(!graph.edges[0].gradient);
+        assert_eq!(graph.edges[0].strength, 2.0);
+    }
+
     #[test]
     fn no_partial_batch_on_missing_endpoint() {
         let mut graph = Graph::new(7);
@@ -441,6 +515,7 @@ mod tests {
                 id: format!("e:{}", MAX_EDGES - 1),
                 color: None,
                 strength: Some(0.25),
+                gradient: None,
             })
             .unwrap();
         assert_eq!(graph.edges.last().unwrap().strength, 0.25);
@@ -459,6 +534,7 @@ mod tests {
                 id: "e".into(),
                 color: None,
                 strength: Some(0.0),
+                gradient: None,
             })
             .unwrap();
         assert_eq!(graph.component_count(), 2);
@@ -564,7 +640,8 @@ mod tests {
             .apply(&Event::SetEdge {
                 id: "e".into(),
                 color: None,
-                strength: Some(f32::MAX)
+                strength: Some(f32::MAX),
+                gradient: None,
             })
             .is_err());
         assert_eq!(graph.nodes[0].radius, 1.0);

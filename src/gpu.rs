@@ -1,6 +1,6 @@
 //! Strictly 2D, all-GPU simulation and rendering on eframe's existing device.
 //!
-//! Force v1 uses rho=64, epsilon²=0.25 and a 2-world-unit displacement cap.
+//! Force v2 uses rho=1024, epsilon²=0.25 and a 2-world-unit displacement cap.
 //! Its shared timestep is min(1/120, 0.5 / maximum weighted node degree),
 //! with 1/120 used when all incident-strength sums are zero. Recomputed on
 //! each graph sync, this scalar limits attraction stiffness without adding
@@ -17,7 +17,9 @@ use std::sync::{mpsc, Arc};
 use bytemuck::{Pod, Zeroable};
 use eframe::wgpu::{self, util::DeviceExt};
 
-use crate::model::{Graph, MAX_EDGES, MAX_NODES};
+use crate::model::{
+    Graph, BASE_TIMESTEP, MAX_DISPLACEMENT, MAX_EDGES, MAX_NODES, REPULSION, SOFTENING_SQUARED,
+};
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 #[repr(C)]
@@ -34,7 +36,7 @@ struct GpuEdge {
     source: u32,
     target: u32,
     strength: f32,
-    padding: u32,
+    gradient: u32,
     color: [f32; 4],
 }
 
@@ -112,10 +114,10 @@ impl GpuGraph {
             &PhysicsParameters {
                 count: 0,
                 padding: [0; 3],
-                repulsion: 64.0,
-                dt: 1.0 / 120.0,
-                softening_squared: 0.25,
-                max_displacement: 2.0,
+                repulsion: REPULSION,
+                dt: BASE_TIMESTEP,
+                softening_squared: SOFTENING_SQUARED,
+                max_displacement: MAX_DISPLACEMENT,
             },
         );
         let frame_parameters = uniform(
@@ -252,7 +254,7 @@ impl GpuGraph {
             active: 0,
             node_count: 0,
             edge_count: 0,
-            effective_dt: 1.0 / 120.0,
+            effective_dt: BASE_TIMESTEP,
             base_styles: Vec::new(),
             incident_degrees: Vec::new(),
             degree_sizing: false,
@@ -311,7 +313,7 @@ impl GpuGraph {
                     source: edge.source as u32,
                     target: edge.target as u32,
                     strength: edge.strength,
-                    padding: 0,
+                    gradient: u32::from(edge.gradient),
                     color: linear_color(edge.color),
                 }
             })
@@ -358,10 +360,10 @@ impl GpuGraph {
             bytemuck::bytes_of(&PhysicsParameters {
                 count: self.node_count as u32,
                 padding: [0; 3],
-                repulsion: 64.0,
+                repulsion: REPULSION,
                 dt: self.effective_timestep(),
-                softening_squared: 0.25,
-                max_displacement: 2.0,
+                softening_squared: SOFTENING_SQUARED,
+                max_displacement: MAX_DISPLACEMENT,
             }),
         );
     }
@@ -823,9 +825,9 @@ fn force_timestep(graph: &Graph) -> f32 {
     }
     let maximum = incident.into_iter().fold(0.0_f64, f64::max);
     if maximum == 0.0 {
-        1.0 / 120.0
+        BASE_TIMESTEP
     } else {
-        (1.0_f64 / 120.0).min(0.5 / maximum) as f32
+        f64::from(BASE_TIMESTEP).min(0.5 / maximum) as f32
     }
 }
 
@@ -877,7 +879,7 @@ mod tests {
         assert_eq!(graph.edges.len(), 5);
         assert_eq!(
             graph.edges.iter().map(|edge| edge.strength).sum::<f32>(),
-            4.0
+            4.0 * crate::model::DEFAULT_EDGE_STRENGTH
         );
         graph
             .apply(&Event::Batch {
@@ -888,6 +890,7 @@ mod tests {
                     target: "isolated".into(),
                     color: "#ffffff".into(),
                     strength: 0.0,
+                    gradient: false,
                 }],
             })
             .unwrap();
@@ -916,6 +919,7 @@ mod tests {
                 target: 1,
                 color: [1.0; 4],
                 strength: 1_000_000.0,
+                gradient: false,
             },
             Edge {
                 id: "02".into(),
@@ -923,6 +927,7 @@ mod tests {
                 target: 2,
                 color: [1.0; 4],
                 strength: 1_000_000.0,
+                gradient: false,
             },
         ];
         assert_eq!(super::force_timestep(&graph), 0.25e-6);
@@ -933,8 +938,9 @@ mod tests {
         let mut left = -1.0_f64;
         for _ in 0..8 {
             let separation = left * 2.0;
-            let force =
-                64.0 * separation / (separation * separation + 0.25) - 1_000_000.0 * separation;
+            let force = f64::from(super::REPULSION) * separation
+                / (separation * separation + f64::from(super::SOFTENING_SQUARED))
+                - 1_000_000.0 * separation;
             left += f64::from(dt) * force;
             assert!((-1.0..=0.0).contains(&left));
         }
@@ -1016,13 +1022,15 @@ mod tests {
                     target: "b".into(),
                     color: "#60708b".into(),
                     strength: 1.0,
+                    gradient: false,
                 }],
             })
             .unwrap();
         gpu.sync_graph(&graph, true);
         gpu.step(1);
         let positions = gpu.read_positions(2).unwrap();
-        let expected = -3.0 + ((64.0 * -6.0 / 36.25) + 6.0) / 120.0;
+        let expected =
+            -3.0 + ((REPULSION * -6.0 / (36.0 + SOFTENING_SQUARED)) + 6.0) * BASE_TIMESTEP;
         assert!((positions[0][0] - expected).abs() < 0.00001);
         assert!((positions[0][0] + positions[1][0]).abs() < 0.00001);
 
@@ -1039,6 +1047,7 @@ mod tests {
                 id: "ab".into(),
                 color: None,
                 strength: Some(2.0),
+                gradient: None,
             })
             .unwrap();
         gpu.sync_graph(&graph, false);
@@ -1095,6 +1104,108 @@ mod tests {
             vec![[-3.0, 0.0], [3.0, 0.0], [0.0, 9.0]]
         );
 
+        // A default two-node spring settles at the analytically known force
+        // balance. This detects an incorrect default or unstable stronger force.
+        let mut balanced = Graph::new(42);
+        balanced
+            .apply(
+                &serde_json::from_value(serde_json::json!({
+                    "op":"batch", "nodes":[
+                        {"id":"left","position":[-3,0]}, {"id":"right","position":[3,0]}
+                    ], "edges":[{"id":"pair","source":"left","target":"right"}]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        gpu.sync_graph(&balanced, true);
+        gpu.step(240);
+        let pair = gpu.read_positions(2).unwrap();
+        let expected_distance =
+            (REPULSION / crate::model::DEFAULT_EDGE_STRENGTH - SOFTENING_SQUARED).sqrt();
+        assert!((pair[1][0] - pair[0][0] - expected_distance).abs() < 0.001);
+        assert!((pair[0][0] + pair[1][0]).abs() < 0.00001);
+        assert!(expected_distance > 1.9 * (64.0_f32 - SOFTENING_SQUARED).sqrt());
+
+        // Gradient pixels must follow the live endpoint colours, interpolate
+        // in linear light, honour opacity and switch back to a solid colour.
+        let mut gradient = Graph::new(42);
+        gradient.apply(&serde_json::from_value(serde_json::json!({
+            "op":"batch", "nodes":[
+                {"id":"red","position":[-10,0],"color":"#ff0000","radius":0.25},
+                {"id":"blue","position":[10,0],"color":"#0000ff","radius":0.25}
+            ], "edges":[{"id":"gradient","source":"red","target":"blue","gradient":true,"color":"#ffffff"}]
+        })).unwrap()).unwrap();
+        gpu.sync_graph(&gradient, true);
+        gpu.render(1024, 128);
+        let gradient_frame = gpu.read_rgba().unwrap();
+        let gradient_camera = read_camera(&gpu);
+        let sample = |frame: &[u8], world_x: f32| -> [u8; 3] {
+            let x = (((world_x - gradient_camera[0]) / gradient_camera[2] + 1.0) * 512.0).floor()
+                as usize;
+            frame[(64 * 1024 + x) * 4..(64 * 1024 + x) * 4 + 3]
+                .try_into()
+                .unwrap()
+        };
+        let left = sample(&gradient_frame, -5.0);
+        let middle = sample(&gradient_frame, 0.0);
+        let right = sample(&gradient_frame, 5.0);
+        assert!(
+            left[0] > left[2] && right[2] > right[0],
+            "Endpoints did not form a gradient: {left:?}, {right:?}"
+        );
+        assert!(
+            (175..=200).contains(&middle[0]) && (175..=200).contains(&middle[2]) && middle[1] < 30,
+            "Expected linear-light red/blue midpoint near #bc00bc, got {middle:?}"
+        );
+        gradient
+            .apply(&Event::SetNode {
+                id: "blue".into(),
+                color: Some("#00ff00".into()),
+                radius: None,
+            })
+            .unwrap();
+        gpu.sync_graph(&gradient, false);
+        gpu.render(1024, 128);
+        let updated = gpu.read_rgba().unwrap();
+        let right = sample(&updated, 5.0);
+        assert!(
+            right[1] > right[0] && right[2] < 30,
+            "Gradient missed live node recolouring: {right:?}"
+        );
+        gradient
+            .apply(&Event::SetEdge {
+                id: "gradient".into(),
+                color: Some("#ffffff80".into()),
+                strength: None,
+                gradient: None,
+            })
+            .unwrap();
+        gpu.sync_graph(&gradient, false);
+        gpu.render(1024, 128);
+        let translucent = gpu.read_rgba().unwrap();
+        let opaque_middle = sample(&updated, 0.0);
+        let translucent_middle = sample(&translucent, 0.0);
+        assert!(
+            translucent_middle[0] < opaque_middle[0] && translucent_middle[1] < opaque_middle[1]
+        );
+        gradient
+            .apply(&Event::SetEdge {
+                id: "gradient".into(),
+                color: Some("#2244cc".into()),
+                strength: None,
+                gradient: Some(false),
+            })
+            .unwrap();
+        gpu.sync_graph(&gradient, false);
+        gpu.render(1024, 128);
+        let solid = gpu.read_rgba().unwrap();
+        assert_eq!(sample(&solid, -5.0), [0x22, 0x44, 0xcc]);
+        assert_eq!(sample(&solid, 5.0), [0x22, 0x44, 0xcc]);
+        assert_eq!(
+            gpu.read_positions(2).unwrap(),
+            vec![[-10.0, 0.0], [10.0, 0.0]]
+        );
+
         // Regression: very stiff springs must not alternate endpoint positions.
         let mut stiff = Graph::new(42);
         stiff
@@ -1106,6 +1217,7 @@ mod tests {
                     target: "right".into(),
                     color: "#60708b".into(),
                     strength: 1_000_000.0,
+                    gradient: false,
                 }],
             })
             .unwrap();
@@ -1131,6 +1243,7 @@ mod tests {
                         target: "b".into(),
                         color: "#60708b".into(),
                         strength: 1.0,
+                        gradient: false,
                     },
                     EdgeSpec {
                         id: "parallel".into(),
@@ -1138,6 +1251,7 @@ mod tests {
                         target: "b".into(),
                         color: "#60708b".into(),
                         strength: 0.0,
+                        gradient: false,
                     },
                     EdgeSpec {
                         id: "self".into(),
@@ -1145,6 +1259,7 @@ mod tests {
                         target: "b".into(),
                         color: "#60708b".into(),
                         strength: 0.0,
+                        gradient: false,
                     },
                 ],
             })
@@ -1162,6 +1277,7 @@ mod tests {
                             target: id.clone(),
                             color: "#60708b".into(),
                             strength: 1.0,
+                            gradient: false,
                         })
                         .collect(),
                 })
@@ -1205,6 +1321,7 @@ mod tests {
                     target: "c".into(),
                     color: "#60708b".into(),
                     strength: 1.0,
+                    gradient: false,
                 }],
             })
             .unwrap();
@@ -1249,7 +1366,8 @@ mod tests {
                             source: id.clone(),
                             target: previous.to_string(),
                             color: "#60708b18".into(),
-                            strength: 1.0,
+                            strength: crate::model::DEFAULT_EDGE_STRENGTH,
+                            gradient: false,
                         })
                         .collect(),
                 })
@@ -1272,7 +1390,10 @@ mod tests {
             degrees[edge.target] += 1;
         }
         assert!(degrees.iter().all(|degree| *degree == 499));
-        assert_eq!(gpu.effective_timestep(), (0.5_f64 / 499.0) as f32);
+        assert_eq!(
+            gpu.effective_timestep(),
+            (0.5_f64 / (499.0 * f64::from(crate::model::DEFAULT_EDGE_STRENGTH))) as f32
+        );
         gpu.step(32);
         let positions = gpu.read_positions(500).unwrap();
         assert!(positions.iter().flatten().all(|value| value.is_finite()));

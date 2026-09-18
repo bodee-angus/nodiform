@@ -19,9 +19,6 @@ use std::{
 
 mod ui;
 
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 112, 245);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(106, 116, 135);
-
 #[derive(Clone, Serialize, Deserialize)]
 struct Project {
     schema: u32,
@@ -99,6 +96,7 @@ pub struct NodiformApp {
     smoke_probe: Option<SmokeProbe>,
     editor_tab: EditorTab,
     show_settings: bool,
+    theme_preference: egui::ThemePreference,
     show_inspector: bool,
     smoke_frame_checked: bool,
     smoke_idle_since: Option<Instant>,
@@ -106,7 +104,16 @@ pub struct NodiformApp {
 
 impl NodiformApp {
     pub fn new(cc: &eframe::CreationContext<'_>, smoke_probe: Option<SmokeProbe>) -> Self {
-        ui::configure(&cc.egui_ctx);
+        let theme_preference = if smoke_probe.is_some() {
+            match std::env::var("NODIFORM_SMOKE_THEME").as_deref() {
+                Ok("dark") => egui::ThemePreference::Dark,
+                Ok("light") => egui::ThemePreference::Light,
+                _ => egui::ThemePreference::System,
+            }
+        } else {
+            crate::theme::restore(cc.storage)
+        };
+        crate::theme::configure(&cc.egui_ctx, theme_preference);
         let render_state = cc
             .wgpu_render_state
             .clone()
@@ -160,6 +167,7 @@ impl NodiformApp {
             smoke_probe,
             editor_tab: EditorTab::Rules,
             show_settings: false,
+            theme_preference,
             show_inspector: false,
             smoke_frame_checked: false,
             smoke_idle_since: None,
@@ -167,6 +175,12 @@ impl NodiformApp {
         if app.smoke_probe.is_some() {
             if let Ok(example) = std::env::var("NODIFORM_SMOKE_EXAMPLE") {
                 app.load_example(&example);
+            }
+            if let Ok(parameters) = std::env::var("NODIFORM_SMOKE_PARAMETERS") {
+                match serde_json::from_str(&parameters) {
+                    Ok(value) => app.project.parameters = value,
+                    Err(error) => app.error = Some(format!("Invalid smoke parameters: {error}")),
+                }
             }
             if std::env::var("NODIFORM_SMOKE_TAB").as_deref() == Ok("inputs") {
                 app.editor_tab = EditorTab::Inputs;
@@ -333,7 +347,7 @@ impl NodiformApp {
                 "rule_api":crate::rules::RULE_API_VERSION,
                 "effective_parameters": effective_parameters,
                 "node_size_rule":if snapshot.size_by_connections { "obsidian-global-sqrt-uncapped-v1" } else { "rule-radius" },
-                "forces":{"repulsion":64,"softening_squared":0.25,"rest_length":0,"gravity":0,"max_displacement":2,"step_policy":"min(1/120,0.5/max_incident_strength)"},
+                "forces":{"version":crate::model::FORCE_VERSION,"repulsion":crate::model::REPULSION,"default_edge_strength":crate::model::DEFAULT_EDGE_STRENGTH,"softening_squared":crate::model::SOFTENING_SQUARED,"rest_length":0,"gravity":0,"max_displacement":crate::model::MAX_DISPLACEMENT,"base_timestep":crate::model::BASE_TIMESTEP,"step_policy":"min(base_timestep,0.5/max_incident_strength)"},
                 "birth_placement":crate::model::BIRTH_PLACEMENT_VERSION,
                 "ticks_per_frame":snapshot.ticks_per_frame,
                 "planned_ticks":plan.total_ticks + u64::from(snapshot.tail_ticks),
@@ -626,6 +640,16 @@ impl NodiformApp {
 }
 
 impl eframe::App for NodiformApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if self.smoke_probe.is_none() {
+            crate::theme::save(storage, self.theme_preference);
+        }
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        self.smoke_probe.is_none()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
         if !self.busy()

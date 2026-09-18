@@ -7,7 +7,7 @@ description = "A laboratory for emergent graphs"
 repository = "https://github.com/bodee-angus/nodiform"
 
 [dependencies]
-eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
+eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland", "persistence"] }
 bytemuck = { version = "1.21", features = ["derive"] }
 pollster = "0.4"
 rquickjs = "=0.9.0"

@@ -2,7 +2,7 @@
   "alphabet": {"type":"text","label":"Alphabet","default":"ABC"},
   "maxLength": {"type":"integer","label":"Maximum length","default":3,"min":1},
   "repetitions": {"type":"boolean","label":"Repeat letters","default":false},
-  "order": {"type":"select","label":"Birth order","default":"lexicographic","options":["lexicographic","reverse","shuffle","branch-walk"]},
+  "order": {"type":"select","label":"Birth order","description":"Connected branch-walk visits each prefix before its descendants.","default":"lexicographic","options":["lexicographic","reverse","shuffle","branch-walk","connected-branch-walk"]},
   "ticksPerNode": {"type":"integer","label":"Ticks between births","default":24,"min":0,"max":1000000},
   "finalTicks": {"type":"integer","label":"Final settling ticks","default":0,"min":0,"max":1000000}
 } */
@@ -10,6 +10,7 @@
 // Parameters: alphabet, maxLength, repetitions, order, ticksPerNode, finalTicks.
 // Layer orders: "lexicographic", "reverse", or "shuffle" (seeded N.random()).
 // "branch-walk" visits alternating branches in opposite directions.
+// "connected-branch-walk" keeps that traversal but always visits a prefix first.
 // Metadata-free legacy scripts also support repeatLetters and reverse aliases.
 function* generate(N, params) {
     const alphabet = Array.from(params.alphabet ?? "ABC");
@@ -18,8 +19,8 @@ function* generate(N, params) {
     const order = params.order ?? (params.reverse ? "reverse" : "lexicographic");
     const ticks = params.ticksPerNode ?? 24;
     const finalTicks = params.finalTicks ?? 0;
-    if (!["lexicographic", "reverse", "shuffle", "branch-walk"].includes(order)) {
-        throw new Error('order must be "lexicographic", "reverse", "shuffle", or "branch-walk"');
+    if (!["lexicographic", "reverse", "shuffle", "branch-walk", "connected-branch-walk"].includes(order)) {
+        throw new Error('order must be "lexicographic", "reverse", "shuffle", "branch-walk", or "connected-branch-walk"');
     }
     if (new Set(alphabet).size !== alphabet.length) throw new Error("Alphabet characters must be unique");
     if (alphabet.length < 1 || !Number.isSafeInteger(maxLength) || maxLength < 1) {
@@ -54,17 +55,19 @@ function* generate(N, params) {
             next.push(0);
         }
     }
-    function* branch(root) {
+    function* branch(root, parentFirst = false) {
         // A forward subtree starts at its prefix. Alternate child subtrees
         // forward/reversed; reversing a subtree also moves its prefix last.
         // Top-level groups stay in alphabet order. ABC therefore starts:
         // A, AB, ABC, ACB, AC, B, BA, BAC, BCA, BC, C, CA, CAB, CBA, CB.
+        // Connected mode emits every prefix first, even in a reversed subtree:
+        // A, AB, ABC, AC, ACB, B, BA, BAC, BC, BCA, C, CA, CAB, CB, CBA.
         const prefix = [root];
         const stack = [{ backwards: false, children: null, step: 0 }];
         while (stack.length) {
             const frame = stack[stack.length - 1];
             if (frame.children === null) {
-                if (!frame.backwards) yield prefix.join("");
+                if (parentFirst || !frame.backwards) yield prefix.join("");
                 frame.children = prefix.length < depthLimit
                     ? alphabet.filter(letter => repeat || !prefix.includes(letter))
                     : [];
@@ -81,22 +84,22 @@ function* generate(N, params) {
                     step: 0
                 });
             } else {
-                if (frame.backwards) yield prefix.join("");
+                if (!parentFirst && frame.backwards) yield prefix.join("");
                 stack.pop();
                 prefix.pop();
             }
         }
     }
     function* births() {
-        if (order === "branch-walk") {
-            for (const letter of alphabet) yield* branch(letter);
+        if (order === "branch-walk" || order === "connected-branch-walk") {
+            for (const letter of alphabet) yield* branch(letter, order === "connected-branch-walk");
             return;
         }
         const letters = order === "reverse" ? [...sortedAlphabet].reverse() : sortedAlphabet;
         for (let length = 1; length <= depthLimit; length++) {
             if (order === "shuffle") {
                 // Shuffling needs the current layer in memory; ordered modes
-                // and branch-walk do not allocate an entire layer up front.
+                // and both branch walks do not allocate an entire layer up front.
                 const layer = Array.from(words(length));
                 for (let i = layer.length - 1; i > 0; i--) {
                     const j = Math.floor(N.random() * (i + 1));
@@ -114,8 +117,10 @@ function* generate(N, params) {
         const parents = letters.length === 1 ? [] : [...new Set([
             letters.slice(0, -1).join(""), letters.slice(1).join("")
         ])];
-        // A branch can visit a child first. Wait for the other endpoint,
+        // Either prefix or suffix can arrive later. Wait for the other endpoint,
         // then create the edge in the same batch as that endpoint's birth.
+        // In connected mode a longer word always has its prefix already born.
+        // Later single-letter roots attach through earlier two-letter words.
         const edges = pending.get(word) ?? [];
         pending.delete(word);
         for (const parent of parents) {

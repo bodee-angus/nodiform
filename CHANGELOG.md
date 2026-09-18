@@ -1,5 +1,13 @@
 # Release changes
 
+## 0.1.6
+
+- Added **connected-branch-walk** to the bundled **Letter permutations** example's **Birth order** input. It retains alternating branch traversal but creates every prefix before its descendants, preventing temporary disconnected islands when the maximum length is at least two.
+- For `ABC` without repetition, the new order is `A, AB, ABC, AC, ACB, B, BA, BAC, BC, BCA, C, CA, CAB, CB, CBA`. The final nodes, contiguous prefix/suffix edges, colours, strengths and timing are unchanged.
+- The original **branch-walk** and layer orders remain available. A maximum length of one still produces separate letters with no edges, as defined by the experiment. No scaffold connections are added.
+
+Load **Experiment → Examples → Letter permutations**, then choose **Inputs → Birth order → connected-branch-walk**. Saved scripts retain their own source; updating the application does not rewrite them. Graph storage, forces and automatic birth placement are unchanged from 0.1.5. The AppImage continues to use the existing Gear Lever update channel.
+
 ## 0.1.5
 
 - Added **Connect to the previous half**: node `n` connects to the most recent `floor(n / 2)` earlier nodes. It defaults to 500 nodes and 62,500 edges, with script-defined inputs and no fixed count ceiling.

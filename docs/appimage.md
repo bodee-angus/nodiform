@@ -1,6 +1,6 @@
 # Install Nodiform on Bazzite
 
-Nodiform 0.1.5 is an **experimental alpha** for x86_64 Linux. The AppImage gives it a self-contained application file, desktop-menu entry, and a Gear Lever update source. Experiments and recordings stay outside the application file. This packaging does not sandbox Nodiform or change its alpha status.
+Nodiform 0.1.6 is an **experimental alpha** for x86_64 Linux. The AppImage gives it a self-contained application file, desktop-menu entry, and a Gear Lever update source. Experiments and recordings stay outside the application file. This packaging does not sandbox Nodiform or change its alpha status.
 
 ## Install with Gear Lever
 
@@ -23,7 +23,7 @@ The AppImage runtime's upstream licence notice is included in [third-party/appim
 
 Open Nodiform's entry in Gear Lever to check for and apply updates. When given a choice, replace the previous application version rather than keeping both to save space. Gear Lever manages the download and desktop integration; Nodiform does not install background updates itself. Bazzite notes that Gear Lever can check for updates, while applying them remains a user action. [Bazzite guide](https://docs.bazzite.gg/Installing_and_Managing_Software/AppImage/)
 
-Version 0.1.5 uses the same update channel as earlier versions, so an existing Gear Lever installation does not need a new source configured. It removes the former 8,192-node and 250,000-edge caps and grows GPU storage with the graph. The force model and automatic birth placement from 0.1.4 are unchanged. Available memory and the GPU’s actual limits still apply; the exact solver can become very slow as node counts grow.
+Version 0.1.6 uses the same update channel as earlier versions, so an existing Gear Lever installation does not need a new source configured. It adds **connected-branch-walk** to the **Letter permutations** example. Load that example, then choose the new option under **Inputs → Birth order**. Graph storage still grows without the former 8,192-node and 250,000-edge caps removed in 0.1.5. The force model and automatic birth placement from 0.1.4 are unchanged. Available memory and the GPU’s actual limits still apply; the exact solver can become very slow as node counts grow.
 
 Older saved experiments and generator scripts remain supported, but their source is preserved. If an older script contains an `8192` guard or a count control with a fixed `max`, that script still restricts itself. Choose the updated example from **Experiment → Examples**, or edit its guard and control yourself. Save any current edits before loading a replacement example.
 

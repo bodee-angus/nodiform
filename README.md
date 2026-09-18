@@ -2,7 +2,7 @@
 
 A native laboratory for emergent graphs. Write rules, choose the order in which a graph grows, and watch its structure develop in two dimensions.
 
-Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.5 removes the fixed node and edge caps and grows GPU storage with the graph. Available memory and the GPU’s actual buffer and indexing limits still determine what can run. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
+Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.6 adds a connected branch-walk order to the letter-permutation example. GPU storage grows with the graph without fixed node and edge caps; available memory and the GPU’s actual buffer and indexing limits still determine what can run. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
 
 ## What this version does
 
@@ -20,6 +20,8 @@ Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. 
 - Optionally sizes nodes by connection count without changing the simulation's forces.
 
 The default experiment is a small eight-node chain with no required inputs. **Experiment → Examples** contains **Connect to every earlier node**, **Connect to the previous half**, letter permutations, a growing ring, and modular residues. Both numbered growth examples default to 500 nodes: connecting to every earlier node creates 124,750 edges, while connecting to the previous half creates 62,500. These are editable experiments, not fixed application modes.
+
+For letter permutations, choose **Inputs → Birth order → connected-branch-walk** to create each prefix before its descendants. With a maximum length of at least two, every node after the first connects to the existing graph at birth. The final graph is the same as with the other birth orders. See the [permutation examples](docs/rules.md#included-experiments-and-limits).
 
 The native egui interface offers **Settings → Appearance → System / Light / Dark**, with matching editor colours and controls. The theme is remembered separately from experiments and does not change recorded graph colours. Rounded cards and blue accents surround a pure black simulation canvas.
 

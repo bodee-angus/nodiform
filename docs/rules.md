@@ -180,7 +180,17 @@ function* generate(N, params) {
 
 The permutation example uses `N.palette(alphabet.length)` and assigns each node the colour of its **first letter**. `A`, `AB` and `ACB` therefore share a colour. Edges blend their endpoint colours. Alphabet characters are Unicode code points, not full grapheme clusters.
 
-Choose **Inputs → Birth order → branch-walk** for:
+Choose **Inputs → Birth order → connected-branch-walk** for:
+
+```text
+A, AB, ABC, AC, ACB,
+B, BA, BAC, BC, BCA,
+C, CA, CAB, CB, CBA
+```
+
+This keeps starting-letter groups in alphabet order and alternates child traversal directions, but always creates a prefix before its descendants. Each longer word connects to its existing prefix in the same batch as its birth. Later single-letter roots attach through two-letter words created in earlier groups. With a maximum length of at least two, every node after the first therefore joins the existing connected graph immediately. Repeated letters and Unicode alphabets use the same rule. A maximum length of one produces letters without edges, so those nodes remain separate by definition.
+
+The original **branch-walk** remains available for:
 
 ```text
 A, AB, ABC, ACB, AC,
@@ -188,7 +198,7 @@ B, BA, BAC, BCA, BC,
 C, CA, CAB, CBA, CB
 ```
 
-This keeps starting-letter groups in alphabet order, visiting child subtrees alternately forward and backwards. Reversing a subtree puts its prefix last, which deliberately places `ACB` before `AC`. The rule generalises to other lengths and repeated letters. An edge waits until both of its nodes exist, then appears with the later node. Changing birth order preserves the final graph while changing its evolution. The layer-based `lexicographic`, `reverse` and seeded `shuffle` options remain available.
+This also alternates forward and backward child subtrees, but reversing a subtree puts its prefix last, which deliberately places `ACB` before `AC` and can create temporary disconnected islands. Both branch walks use an explicit stack and work with other lengths and repeated letters. An edge waits until both of its nodes exist, then appears with the later node. Changing birth order preserves the final graph, colours and edge strengths while changing its evolution; connected mode adds no scaffold edges. The layer-based `lexicographic`, `reverse` and seeded `shuffle` options remain available.
 
 There is no application-selected node or edge count cap. The graph must fit the GPU’s actual buffer and dispatch limits, shader index ranges, available GPU memory, and host memory. Exact all-pairs repulsion remains O(N²), so larger graphs can be much slower even when they fit.
 

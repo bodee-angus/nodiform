@@ -16,6 +16,6 @@ mkdir -p dist
 tar -czf "$output" \
     --transform='s,^target/release/nodiform$,nodiform,' \
     --transform='s,^,nodiform/,' \
-    target/release/nodiform README.md examples docs packaging/nodiform.desktop
+    target/release/nodiform README.md CHANGELOG.md examples docs packaging/nodiform.desktop
 
 echo "Created ${output}"

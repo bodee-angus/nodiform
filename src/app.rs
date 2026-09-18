@@ -177,10 +177,8 @@ impl NodiformApp {
                 app.load_example(&example);
             }
             if let Ok(parameters) = std::env::var("NODIFORM_SMOKE_PARAMETERS") {
-                match serde_json::from_str(&parameters) {
-                    Ok(value) => app.project.parameters = value,
-                    Err(error) => app.error = Some(format!("Invalid smoke parameters: {error}")),
-                }
+                // Use the same input buffer and validation path as the editor.
+                app.parameters_text = parameters;
             }
             if std::env::var("NODIFORM_SMOKE_TAB").as_deref() == Ok("inputs") {
                 app.editor_tab = EditorTab::Inputs;

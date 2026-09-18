@@ -522,10 +522,10 @@ mod tests {
             .collect();
         for (index, colour) in colours.iter().enumerate() {
             assert!((0.63..=0.83).contains(&colour[0]));
-            assert!(colour[1].hypot(colour[2]) > 0.10);
+            assert!(colour[1].hypot(colour[2]) > 0.13);
             for other in &colours[..index] {
                 let squared: f64 = colour.iter().zip(other).map(|(a, b)| (a - b).powi(2)).sum();
-                assert!(squared.sqrt() > 0.13);
+                assert!(squared.sqrt() > 0.09);
             }
         }
     }

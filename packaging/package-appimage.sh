@@ -87,6 +87,7 @@ ln -s nodiform.svg "$app_dir/.DirIcon"
 install -D -m 0644 packaging/nodiform.svg "$app_dir/usr/share/icons/hicolor/scalable/apps/nodiform.svg"
 install -D -m 0644 packaging/nodiform-appimage.desktop "$app_dir/usr/share/applications/nodiform.desktop"
 install -D -m 0644 README.md "$app_dir/usr/share/doc/nodiform/README.md"
+install -D -m 0644 CHANGELOG.md "$app_dir/usr/share/doc/nodiform/CHANGELOG.md"
 cp -R examples docs "$app_dir/usr/share/doc/nodiform/"
 
 # Use extract-and-run for the build tool so packaging works without /dev/fuse.

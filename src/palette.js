@@ -65,9 +65,19 @@
         candidates[0] = vivid(0.70, 255 / 360);
         const lightnesses = [0.64, 0.70, 0.76, 0.82];
         for (let hue = 0; hue < 180; hue++) {
+            // Select the lightness with greatest in-gamut chroma at this hue.
+            // A fixed lightness can make yellow muddy or pink pastel even at
+            // maximum saturation. This keeps the candidate pool vivid while
+            // letting each hue find its most colourful usable brightness.
+            let mostChromatic;
             for (let level = 0; level < lightnesses.length; level++) {
-                candidates[candidates.length] = vivid(lightnesses[level], hue / 180);
+                const colour = vivid(lightnesses[level], hue / 180);
+                if (!mostChromatic || colour.a ** 2 + colour.b ** 2 >
+                    mostChromatic.a ** 2 + mostChromatic.b ** 2) {
+                    mostChromatic = colour;
+                }
             }
+            candidates[candidates.length] = mostChromatic;
         }
     }
 

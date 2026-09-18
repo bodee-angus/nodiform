@@ -1,13 +1,12 @@
-// Nodiform Force v2: exact softened inverse-distance repulsion, weighted
-// zero-rest springs, stiffness-limited overdamped Euler steps. No gravity or
-// collision. CPU supplies one shared dt=min(1/120,0.5/max weighted degree),
-// recomputed only when graph structure/strengths change. This attraction
-// safeguard and the displacement cap are not a full energy-monotonicity proof.
+// Nodiform Force v3: weighted zero-rest springs and exact softened repulsion.
+// Damped second-order steps retain 85% of the prior tick displacement. A shared
+// force step limits attraction stiffness; the final displacement cap also caps
+// stored momentum, preventing accumulated velocity behind the cap. No gravity.
 struct Parameters {
     count: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
+    momentum_retention: f32,
     repulsion: f32,
     dt: f32,
     softening_squared: f32,
@@ -26,6 +25,7 @@ struct Neighbour {
 @group(0) @binding(2) var<storage, read> offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> neighbours: array<Neighbour>;
 @group(0) @binding(4) var<uniform> parameters: Parameters;
+@group(0) @binding(5) var<storage, read_write> momentum: array<vec2<f32>>;
 
 var<workgroup> tile: array<vec2<f32>, 128>;
 
@@ -64,7 +64,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let neighbour = neighbours[j];
         force += neighbour.strength * (previous[neighbour.other] - p);
     }
-    var movement = parameters.dt * force;
+    var movement = parameters.momentum_retention * momentum[i] + parameters.dt * force;
     // Scale before taking a norm so large, finite force sums cannot overflow
     // the length's squared components and accidentally freeze the node.
     let largest_component = max(abs(movement.x), abs(movement.y));
@@ -75,5 +75,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
             movement = direction * (parameters.max_displacement / direction_length);
         }
     }
+    momentum[i] = movement;
     next[i] = p + movement;
 }

@@ -139,9 +139,17 @@ The seed, playback timing, recording settings, and appearance options belong in 
 
 Creation and updates consume no simulation ticks. `graph.wait` lets the graph move between edits. Creating a hundred nodes and then waiting therefore differs from waiting after each birth. Multiple operations without intervening waits give the solver no time to react between them.
 
-A recording's frame rate and ticks per frame determine how ticks become video samples. A tick is neither one second nor necessarily one video frame. The solver's numerical mobility is separate from playback timing. The configured final settling interval runs after the plan has finished.
+A recording's frame rate and ticks per frame determine how ticks become video samples. Preview targets their product in solver ticks per second, carrying fractional ticks between display refreshes; the defaults give 240 ticks per second. Preview has bounded catch-up after a stall, while recording preserves every fixed timeline sample even when it takes longer than real time. A tick is neither one second nor necessarily one video frame. The solver's force multiplier is separate from playback timing. The configured final settling interval runs after the plan has finished.
 
-For fair order comparisons, keep the seed, birth-position policy, waits, and solver settings fixed. Default birth positions are determined by the seed and node ID in a 24 × 24 world-unit square centred on the origin. They do not depend on neighbours' evolving positions. Supply `position` for a different placement rule.
+### Where new nodes appear
+
+Without a `position` option, a new node starts near the average **current** position of the connected nodes created before it. A deterministic seed-and-ID offset in `[-1, 1)` world units per axis avoids placing every birth at exactly the same coordinate. If it has no connected predecessors, it starts near the world origin `[0, 0]` with that offset. The average counts each neighbour once regardless of duplicate edges, edge direction or strength; zero-strength edges still identify neighbours.
+
+Operations without an intervening positive wait are synchronised together. A birth can use connections present at that synchronisation, including connections to nodes created earlier at the same simulated time. It cannot use a node created later in the sequence as an anchor. Connections added after a positive wait only change the forces and drawing; they do not reposition nodes that already exist.
+
+Use `graph.add("A", { position: [20, 10] })` for an exact initial position, or the equivalent `N.node` option. Explicit positions override automatic placement and remain subject to normal force simulation afterward. The generator cannot read live positions; automatic neighbour placement is resolved by the GPU during playback.
+
+For fair order comparisons, keep the seed, birth policy, waits and solver version fixed. The seed fixes the offset, but the complete initial position also depends on the birth order and the evolving neighbours. Changing the order can therefore change both placement and subsequent motion.
 
 Use `graph.random()` instead of `Math.random()`. Filesystem access, network access, a general module loader, wall-clock timers, and unseeded randomness are not exposed.
 

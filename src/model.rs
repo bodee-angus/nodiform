@@ -1,4 +1,4 @@
-//! Validated, ordered graph events. Positions here are birth positions, not solver state.
+//! Validated, ordered graph events. Positions here are birth hints, not solver state.
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -6,14 +6,16 @@ pub const MAX_NODES: usize = 8_192;
 // A complete 500-node graph has 124,750 edges. Keep the bounded exact solver
 // useful for dense experiments as well as sparse growth rules.
 pub const MAX_EDGES: usize = 250_000;
-pub const BIRTH_PLACEMENT_VERSION: &str = "seeded-id-jitter-v1";
+pub const BIRTH_PLACEMENT_VERSION: &str = "live-neighbour-centroid-v2";
 /// Pinned force parameters shared by the solver, defaults and recording metadata.
-pub const FORCE_VERSION: &str = "nodiform-force-v2";
-pub const REPULSION: f32 = 1024.0;
+pub const FORCE_VERSION: &str = "nodiform-force-v3";
+pub const REPULSION: f32 = 512.0;
 pub const DEFAULT_EDGE_STRENGTH: f32 = 4.0;
 pub const SOFTENING_SQUARED: f32 = 0.25;
 pub const MAX_DISPLACEMENT: f32 = 2.0;
 pub const BASE_TIMESTEP: f32 = 1.0 / 120.0;
+/// Fraction of the previous tick's displacement retained by the damped solver.
+pub const MOMENTUM_RETENTION: f32 = 0.85;
 /// Domain limits keep finite user inputs within the GPU solver's numeric range.
 pub const MAX_NUMERIC_MAGNITUDE: f32 = 1_000_000.0;
 
@@ -23,8 +25,12 @@ pub struct Node {
     pub label: String,
     pub color: [f32; 4],
     pub radius: f32,
-    /// Initial coordinates only. The GPU owns the evolving coordinates.
+    /// Explicit birth coordinates, or a small offset for automatic placement.
+    /// The GPU owns the evolving coordinates and resolves automatic births
+    /// against the live positions of already-present connected neighbours.
     pub position: [f32; 2],
+    #[serde(default)]
+    pub auto_position: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -236,6 +242,7 @@ impl Graph {
                 color,
                 radius: spec.radius,
                 position,
+                auto_position: spec.position.is_none(),
             });
         }
 
@@ -339,7 +346,9 @@ pub fn parse_color(text: &str) -> Result<[f32; 4], String> {
 }
 
 /// FNV-1a of UTF-8 ID plus seed, followed by two integer avalanches.
-/// Samples a 24×24 world-unit square; independent of graph order or solver state.
+/// Samples a 2×2 world-unit square. The GPU adds this deterministic offset to
+/// the neighbours' current centroid, or the origin if no neighbours exist.
+/// A small offset avoids coincident births with no direction for repulsion.
 fn birth_position(seed: u32, id: &str) -> [f32; 2] {
     let mut hash = 2_166_136_261u32 ^ seed;
     for byte in id.bytes() {
@@ -352,7 +361,7 @@ fn birth_position(seed: u32, id: &str) -> [f32; 2] {
         n = n.wrapping_mul(0x846c_a68b);
         n ^ (n >> 16)
     }
-    let component = |n: u32| ((mix(n) >> 8) as f32 / 16_777_216.0 - 0.5) * 24.0;
+    let component = |n: u32| ((mix(n) >> 8) as f32 / 16_777_216.0 - 0.5) * 2.0;
     [component(hash), component(hash ^ 0x9e37_79b9)]
 }
 
@@ -577,6 +586,27 @@ mod tests {
             })
             .unwrap();
         assert_eq!(left.nodes[0].position, right.nodes[1].position);
+        assert!(left.nodes.iter().all(|node| node.auto_position));
+        assert!(left
+            .nodes
+            .iter()
+            .flat_map(|node| node.position)
+            .all(|coordinate| (-1.0..1.0).contains(&coordinate)));
+    }
+    #[test]
+    fn explicit_birth_positions_are_distinguished_from_auto_offsets() {
+        let mut graph = Graph::new(42);
+        let mut explicit = node("explicit");
+        explicit.position = Some([0.0, 0.0]);
+        graph
+            .apply(&Event::Batch {
+                nodes: vec![node("automatic"), explicit],
+                edges: vec![],
+            })
+            .unwrap();
+        assert!(graph.nodes[0].auto_position);
+        assert!(!graph.nodes[1].auto_position);
+        assert_eq!(graph.nodes[1].position, [0.0, 0.0]);
     }
     #[test]
     fn colors_and_finite_values_are_validated() {

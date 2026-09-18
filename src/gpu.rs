@@ -1,13 +1,12 @@
 //! Strictly 2D, all-GPU simulation and rendering on eframe's existing device.
 //!
-//! Force v2 uses rho=1024, epsilon²=0.25 and a 2-world-unit displacement cap.
-//! Its shared timestep is min(1/120, 0.5 / maximum weighted node degree),
-//! with 1/120 used when all incident-strength sums are zero. Recomputed on
-//! each graph sync, this scalar limits attraction stiffness without adding
-//! forces or changing their relative weights. Every node has the same charge.
-//! Springs have zero rest length; visual radii do not change forces. This
-//! attraction safeguard is not a proof of energy-monotonic descent for the
-//! full repulsion-plus-attraction scheme or of finding a global minimum.
+//! Force v3 uses rho=512, epsilon²=0.25 and a 2-world-unit displacement cap.
+//! Each tick retains 85% of the previous displacement and adds the complete
+//! force times min(1/120, 0.5 / maximum weighted node degree). This damped
+//! second-order update preserves momentum while limiting attraction stiffness.
+//! Every node has the same charge. Springs have zero rest length; visual radii
+//! do not change forces. Damping removes kinetic energy without adding gravity.
+//! This is not a proof of energy-monotonic descent or a global minimum.
 //!
 //! Repulsion is exact O(N²), attraction is O(E). This bounded first engine is
 //! not a Barnes-Hut implementation and has no claimed hardware throughput.
@@ -18,7 +17,8 @@ use bytemuck::{Pod, Zeroable};
 use eframe::wgpu::{self, util::DeviceExt};
 
 use crate::model::{
-    Graph, BASE_TIMESTEP, MAX_DISPLACEMENT, MAX_EDGES, MAX_NODES, REPULSION, SOFTENING_SQUARED,
+    Graph, BASE_TIMESTEP, MAX_DISPLACEMENT, MAX_EDGES, MAX_NODES, MOMENTUM_RETENTION, REPULSION,
+    SOFTENING_SQUARED,
 };
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
@@ -53,7 +53,8 @@ struct Neighbour {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct PhysicsParameters {
     count: u32,
-    padding: [u32; 3],
+    padding: [u32; 2],
+    momentum_retention: f32,
     repulsion: f32,
     dt: f32,
     softening_squared: f32,
@@ -73,20 +74,18 @@ pub struct GpuGraph {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     positions: [wgpu::Buffer; 2],
+    momentum: wgpu::Buffer,
+    births: crate::births::BirthInitializer,
     styles: wgpu::Buffer,
     edges: wgpu::Buffer,
     offsets: wgpu::Buffer,
     neighbours: wgpu::Buffer,
     physics_parameters: wgpu::Buffer,
-    frame_parameters: wgpu::Buffer,
-    camera: wgpu::Buffer,
     physics_pipeline: wgpu::ComputePipeline,
     bounds_pipeline: wgpu::ComputePipeline,
     node_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     physics_groups: [wgpu::BindGroup; 2],
-    bounds_groups: [wgpu::BindGroup; 2],
-    render_groups: [wgpu::BindGroup; 2],
     active: usize,
     node_count: usize,
     edge_count: usize,
@@ -94,6 +93,17 @@ pub struct GpuGraph {
     base_styles: Vec<NodeStyle>,
     incident_degrees: Vec<u32>,
     degree_sizing: bool,
+    output: FrameTarget,
+    preview: FrameTarget,
+}
+
+/// Each view owns its camera history, so preview resizing or refresh cadence
+/// cannot alter the reproducible export camera or the selected video size.
+struct FrameTarget {
+    frame_parameters: wgpu::Buffer,
+    camera: wgpu::Buffer,
+    bounds_groups: [wgpu::BindGroup; 2],
+    render_groups: [wgpu::BindGroup; 2],
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     dimensions: (u32, u32),
@@ -103,34 +113,25 @@ impl GpuGraph {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         let positions =
             std::array::from_fn(|_| storage(&device, "node positions", MAX_NODES * 8, true));
+        let momentum = storage(&device, "tick displacement momentum", MAX_NODES * 8, true);
+        let births = crate::births::BirthInitializer::new(&device, &positions);
         let styles = storage(&device, "node styles", MAX_NODES * 32, true);
         let edges = storage(&device, "edges", MAX_EDGES * 32, false);
         let offsets = storage(&device, "adjacency offsets", (MAX_NODES + 1) * 4, false);
         let neighbours = storage(&device, "adjacency entries", MAX_EDGES * 2 * 16, false);
-        let camera = storage(&device, "auto-fit camera", 16, true);
         let physics_parameters = uniform(
             &device,
             "force parameters",
             &PhysicsParameters {
                 count: 0,
-                padding: [0; 3],
+                padding: [0; 2],
+                momentum_retention: MOMENTUM_RETENTION,
                 repulsion: REPULSION,
                 dt: BASE_TIMESTEP,
                 softening_squared: SOFTENING_SQUARED,
                 max_displacement: MAX_DISPLACEMENT,
             },
         );
-        let frame_parameters = uniform(
-            &device,
-            "frame parameters",
-            &FrameParameters {
-                width: 1280.0,
-                height: 720.0,
-                count: 0,
-                edges: 0,
-            },
-        );
-
         let compute = wgpu::ShaderStages::COMPUTE;
         let vertex = wgpu::ShaderStages::VERTEX;
         let physics_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -141,6 +142,7 @@ impl GpuGraph {
                 buffer_layout(2, compute, true, false),
                 buffer_layout(3, compute, true, false),
                 buffer_layout(4, compute, true, true),
+                buffer_layout(5, compute, false, false),
             ],
         });
         let bounds_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -173,25 +175,26 @@ impl GpuGraph {
                     &offsets,
                     &neighbours,
                     &physics_parameters,
+                    &momentum,
                 ],
             )
         });
-        let bounds_groups = std::array::from_fn(|i| {
-            bind_group(
-                &device,
-                "bounds bindings",
-                &bounds_layout,
-                &[&positions[i], &styles, &camera, &frame_parameters],
-            )
-        });
-        let render_groups = std::array::from_fn(|i| {
-            bind_group(
-                &device,
-                "render bindings",
-                &render_layout,
-                &[&positions[i], &styles, &edges, &camera, &frame_parameters],
-            )
-        });
+        let output = FrameTarget::new(
+            &device,
+            &positions,
+            &styles,
+            &edges,
+            &bounds_layout,
+            &render_layout,
+        );
+        let preview = FrameTarget::new(
+            &device,
+            &positions,
+            &styles,
+            &edges,
+            &bounds_layout,
+            &render_layout,
+        );
 
         let physics_shader = shader(
             &device,
@@ -230,27 +233,22 @@ impl GpuGraph {
             "edge_vertex",
             "edge_fragment",
         );
-        let dimensions = (1280, 720);
-        let texture = output_texture(&device, dimensions);
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         Self {
             device,
             queue,
             positions,
+            momentum,
+            births,
             styles,
             edges,
             offsets,
             neighbours,
             physics_parameters,
-            frame_parameters,
-            camera,
             physics_pipeline,
             bounds_pipeline,
             node_pipeline,
             edge_pipeline,
             physics_groups,
-            bounds_groups,
-            render_groups,
             active: 0,
             node_count: 0,
             edge_count: 0,
@@ -258,9 +256,8 @@ impl GpuGraph {
             base_styles: Vec::new(),
             incident_degrees: Vec::new(),
             degree_sizing: false,
-            texture,
-            view,
-            dimensions,
+            output,
+            preview,
         }
     }
 
@@ -287,10 +284,21 @@ impl GpuGraph {
                 self.queue
                     .write_buffer(buffer, (first * 8) as u64, bytemuck::cast_slice(&births));
             }
+            // New nodes begin at rest; style/edge updates preserve live momentum.
+            let rest = vec![[0.0_f32; 2]; births.len()];
+            self.queue.write_buffer(
+                &self.momentum,
+                (first * 8) as u64,
+                bytemuck::cast_slice(&rest),
+            );
         }
         if reset {
             self.active = 0;
             self.reset_camera();
+        }
+        if first < graph.nodes.len() {
+            self.births
+                .initialise(&self.device, &self.queue, graph, first, self.active);
         }
         self.base_styles = graph
             .nodes
@@ -359,7 +367,8 @@ impl GpuGraph {
             0,
             bytemuck::bytes_of(&PhysicsParameters {
                 count: self.node_count as u32,
-                padding: [0; 3],
+                padding: [0; 2],
+                momentum_retention: MOMENTUM_RETENTION,
                 repulsion: REPULSION,
                 dt: self.effective_timestep(),
                 softening_squared: SOFTENING_SQUARED,
@@ -436,16 +445,31 @@ impl GpuGraph {
         self.queue.submit(Some(encoder.finish()));
     }
 
-    /// Render one camera sample to the offscreen sRGB image. A resize replaces
-    /// the TextureView; the UI must re-register it with its texture renderer.
+    /// Render one export camera sample at the selected recording resolution.
     pub fn render(&mut self, width: u32, height: u32) {
-        let dimensions = (width.max(1), height.max(1));
-        if dimensions != self.dimensions {
-            self.texture = output_texture(&self.device, dimensions);
-            self.view = self
+        self.render_target(width, height, false);
+    }
+
+    /// Render at the canvas's physical pixel dimensions. Its independent camera
+    /// and image never change export resolution or export camera smoothing.
+    pub fn render_preview(&mut self, width: u32, height: u32) {
+        self.render_target(width, height, true);
+    }
+
+    fn render_target(&mut self, width: u32, height: u32, preview: bool) {
+        let dimensions =
+            fitted_dimensions(width, height, self.device.limits().max_texture_dimension_2d);
+        let target = if preview {
+            &mut self.preview
+        } else {
+            &mut self.output
+        };
+        if dimensions != target.dimensions {
+            target.texture = output_texture(&self.device, dimensions);
+            target.view = target
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
-            self.dimensions = dimensions;
+            target.dimensions = dimensions;
         }
         let parameters = FrameParameters {
             width: dimensions.0 as f32,
@@ -454,7 +478,7 @@ impl GpuGraph {
             edges: self.edge_count as u32,
         };
         self.queue
-            .write_buffer(&self.frame_parameters, 0, bytemuck::bytes_of(&parameters));
+            .write_buffer(&target.frame_parameters, 0, bytemuck::bytes_of(&parameters));
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -466,22 +490,17 @@ impl GpuGraph {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.bounds_pipeline);
-            pass.set_bind_group(0, &self.bounds_groups[self.active], &[]);
+            pass.set_bind_group(0, &target.bounds_groups[self.active], &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("2D graph render"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.view,
+                    view: &target.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0035,
-                            g: 0.006,
-                            b: 0.012,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -489,7 +508,7 @@ impl GpuGraph {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_bind_group(0, &self.render_groups[self.active], &[]);
+            pass.set_bind_group(0, &target.render_groups[self.active], &[]);
             pass.set_pipeline(&self.edge_pipeline);
             pass.draw(0..6, 0..self.edge_count as u32);
             pass.set_pipeline(&self.node_pipeline);
@@ -499,24 +518,36 @@ impl GpuGraph {
     }
 
     pub fn reset_camera(&mut self) {
-        self.queue
-            .write_buffer(&self.camera, 0, bytemuck::cast_slice(&[0.0f32; 4]));
+        for target in [&self.output, &self.preview] {
+            self.queue
+                .write_buffer(&target.camera, 0, bytemuck::cast_slice(&[0.0_f32; 4]));
+        }
     }
 
-    pub fn view(&self) -> &wgpu::TextureView {
-        &self.view
+    pub fn preview_view(&self) -> &wgpu::TextureView {
+        &self.preview.view
     }
-    pub fn texture(&self) -> &wgpu::Texture {
-        &self.texture
+    pub fn preview_dimensions(&self) -> (u32, u32) {
+        self.preview.dimensions
     }
+    #[cfg(test)]
     pub fn dimensions(&self) -> (u32, u32) {
-        self.dimensions
+        self.output.dimensions
     }
 
     /// Explicit synchronous readback for lossless frame delivery to the video
     /// encoder. The caller must apply backpressure instead of dropping frames.
     pub fn read_rgba(&self) -> Result<Vec<u8>, String> {
-        let (width, height) = self.dimensions;
+        self.read_target_rgba(&self.output)
+    }
+
+    /// Diagnostics only; normal interactive preview never transfers pixels.
+    pub fn read_preview_rgba(&self) -> Result<Vec<u8>, String> {
+        self.read_target_rgba(&self.preview)
+    }
+
+    fn read_target_rgba(&self, target: &FrameTarget) -> Result<Vec<u8>, String> {
+        let (width, height) = target.dimensions;
         let unpadded = width * 4;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -534,7 +565,7 @@ impl GpuGraph {
             });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: self.texture(),
+                texture: &target.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -616,6 +647,70 @@ impl GpuGraph {
         buffer.unmap();
         Ok(bytes)
     }
+}
+
+impl FrameTarget {
+    fn new(
+        device: &wgpu::Device,
+        positions: &[wgpu::Buffer; 2],
+        styles: &wgpu::Buffer,
+        edges: &wgpu::Buffer,
+        bounds_layout: &wgpu::BindGroupLayout,
+        render_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let camera = storage(device, "auto-fit camera", 16, true);
+        let frame_parameters = uniform(
+            device,
+            "frame parameters",
+            &FrameParameters {
+                width: 1280.0,
+                height: 720.0,
+                count: 0,
+                edges: 0,
+            },
+        );
+        let bounds_groups = std::array::from_fn(|i| {
+            bind_group(
+                device,
+                "bounds bindings",
+                bounds_layout,
+                &[&positions[i], styles, &camera, &frame_parameters],
+            )
+        });
+        let render_groups = std::array::from_fn(|i| {
+            bind_group(
+                device,
+                "render bindings",
+                render_layout,
+                &[&positions[i], styles, edges, &camera, &frame_parameters],
+            )
+        });
+        let dimensions = (1280, 720);
+        let texture = output_texture(device, dimensions);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            frame_parameters,
+            camera,
+            bounds_groups,
+            render_groups,
+            texture,
+            view,
+            dimensions,
+        }
+    }
+}
+
+fn fitted_dimensions(width: u32, height: u32, maximum: u32) -> (u32, u32) {
+    let (width, height, maximum) = (width.max(1), height.max(1), maximum.max(1));
+    let largest = width.max(height);
+    if largest <= maximum {
+        return (width, height);
+    }
+    let scale = f64::from(maximum) / f64::from(largest);
+    (
+        (f64::from(width) * scale).floor().max(1.0) as u32,
+        (f64::from(height) * scale).floor().max(1.0) as u32,
+    )
 }
 
 fn storage(device: &wgpu::Device, label: &str, bytes: usize, copy_source: bool) -> wgpu::Buffer {
@@ -909,6 +1004,7 @@ mod tests {
                 color: [1.0; 4],
                 radius: 1.0,
                 position: [index as f32, 0.0],
+                auto_position: false,
             })
             .collect();
         assert_eq!(super::force_timestep(&graph), 1.0 / 120.0);
@@ -934,23 +1030,29 @@ mod tests {
         graph.edges[1].strength = 0.0;
         let dt = super::force_timestep(&graph);
         assert_eq!(dt, 0.5e-6);
-        // Previously this one-dimensional pair swapped +/-1 every step.
-        let mut left = -1.0_f64;
-        for _ in 0..8 {
-            let separation = left * 2.0;
-            let force = f64::from(super::REPULSION) * separation
-                / (separation * separation + f64::from(super::SOFTENING_SQUARED))
-                - 1_000_000.0 * separation;
-            left += f64::from(dt) * force;
-            assert!((-1.0..=0.0).contains(&left));
-        }
+        // The spring Laplacian has largest eigenvalue at most 2 × weighted
+        // degree. The selected force step keeps its product no greater than 1,
+        // inside the damped second-order linear stability interval.
+        assert!(dt * 2.0 * 1_000_000.0 <= 1.0);
+        assert!(dt * 2.0 * 1_000_000.0 < 2.0 * (1.0 + super::MOMENTUM_RETENTION));
         graph.edges[0].strength = 0.0;
         assert_eq!(super::force_timestep(&graph), 1.0 / 120.0);
     }
 
     #[test]
+    fn native_preview_dimensions_preserve_aspect_with_device_limits() {
+        use super::fitted_dimensions;
+        assert_eq!(fitted_dimensions(3840, 2160, 8192), (3840, 2160));
+        assert_eq!(fitted_dimensions(16384, 8192, 8192), (8192, 4096));
+        assert_eq!(fitted_dimensions(5000, 10000, 8192), (4096, 8192));
+        assert_eq!(fitted_dimensions(0, 0, 8192), (1, 1));
+        assert_eq!(fitted_dimensions(u32::MAX, 1, 8192), (8192, 1));
+    }
+
+    #[test]
     fn wgsl_shaders_parse_and_validate() {
         for (name, source) in [
+            ("births", include_str!("shaders/births.wgsl")),
             ("physics", include_str!("shaders/physics.wgsl")),
             ("bounds", include_str!("shaders/bounds.wgsl")),
             ("render", include_str!("shaders/render.wgsl")),
@@ -1005,6 +1107,23 @@ mod tests {
         ))
         .expect("Vulkan device creation failed");
         let mut gpu = GpuGraph::new(Arc::new(device), Arc::new(queue));
+        // Both targets really clear to black, including sRGB output conversion.
+        gpu.render(31, 17);
+        gpu.render_preview(29, 19);
+        assert!(gpu
+            .read_rgba()
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [0, 0, 0, 255]));
+        assert!(gpu
+            .read_preview_rgba()
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [0, 0, 0, 255]));
         let mut graph = Graph::new(42);
         let node = |id: &str, position: [f32; 2]| NodeSpec {
             id: id.into(),
@@ -1083,6 +1202,16 @@ mod tests {
             .any(|pixel| pixel[0] > 100 || pixel[2] > 100));
 
         let camera_before = read_camera(&gpu);
+        // A monitor-sized preview has independent camera history and cannot
+        // resize or perturb the selected export output, even when sampled often.
+        for dimensions in [(3840, 2160), (257, 911), (800, 600)] {
+            gpu.render_preview(dimensions.0, dimensions.1);
+            assert_eq!(gpu.preview_dimensions(), dimensions);
+            assert_eq!(gpu.dimensions(), (137, 91));
+            assert_eq!(read_camera(&gpu), camera_before);
+        }
+        assert_eq!(gpu.read_preview_rgba().unwrap().len(), 800 * 600 * 4);
+        assert_eq!(gpu.read_rgba().unwrap(), frame);
         graph
             .apply(&Event::Batch {
                 nodes: vec![node("distant", [1000.0, -900.0])],
@@ -1124,7 +1253,7 @@ mod tests {
             (REPULSION / crate::model::DEFAULT_EDGE_STRENGTH - SOFTENING_SQUARED).sqrt();
         assert!((pair[1][0] - pair[0][0] - expected_distance).abs() < 0.001);
         assert!((pair[0][0] + pair[1][0]).abs() < 0.00001);
-        assert!(expected_distance > 1.9 * (64.0_f32 - SOFTENING_SQUARED).sqrt());
+        assert!(expected_distance > 1.3 * (64.0_f32 - SOFTENING_SQUARED).sqrt());
 
         // Gradient pixels must follow the live endpoint colours, interpolate
         // in linear light, honour opacity and switch back to a solid colour.
@@ -1206,7 +1335,8 @@ mod tests {
             vec![[-10.0, 0.0], [10.0, 0.0]]
         );
 
-        // Regression: very stiff springs must not alternate endpoint positions.
+        // With inertia, very stiff springs may cross their equilibrium, but
+        // crossings must stay bounded and their oscillation must decay.
         let mut stiff = Graph::new(42);
         stiff
             .apply(&Event::Batch {
@@ -1223,12 +1353,54 @@ mod tests {
             .unwrap();
         gpu.sync_graph(&stiff, true);
         assert_eq!(gpu.effective_timestep(), 0.5e-6);
-        for _ in 0..16 {
+        for _ in 0..160 {
             gpu.step(1);
             let positions = gpu.read_positions(2).unwrap();
-            assert!(positions[0][0] <= 1e-7 && positions[1][0] >= -1e-7);
             assert!(positions.iter().flatten().all(|value| value.is_finite()));
+            assert!(positions.iter().all(|position| position[0].abs() <= 1.01));
         }
+        assert!(gpu
+            .read_positions(2)
+            .unwrap()
+            .iter()
+            .all(|position| position[0].abs() < 0.0001));
+
+        // Momentum survives a force-free tick instead of being discarded. An
+        // isolated node has no force at all, making the damping observable.
+        let mut coasting = Graph::new(42);
+        coasting
+            .apply(&Event::Batch {
+                nodes: vec![node("coasting", [0.0, 0.0])],
+                edges: vec![],
+            })
+            .unwrap();
+        gpu.sync_graph(&coasting, true);
+        gpu.queue
+            .write_buffer(&gpu.momentum, 0, bytemuck::cast_slice(&[[1.0_f32, 0.5]]));
+        gpu.step(1);
+        let first_coast = gpu.read_positions(1).unwrap()[0];
+        assert_eq!(first_coast, [MOMENTUM_RETENTION, MOMENTUM_RETENTION * 0.5]);
+        gpu.sync_graph(&coasting, false);
+        gpu.step(1);
+        let next_coast = gpu.read_positions(1).unwrap()[0];
+        assert!((next_coast[0] - first_coast[0] - MOMENTUM_RETENTION.powi(2)).abs() < 0.00001);
+        gpu.sync_graph(&coasting, true);
+        gpu.step(2);
+        assert_eq!(gpu.read_positions(1).unwrap()[0], [0.0, 0.0]);
+
+        // The cap constrains stored momentum as well as visible displacement;
+        // it must not hide a velocity that continues pushing at maximum speed.
+        gpu.queue
+            .write_buffer(&gpu.momentum, 0, bytemuck::cast_slice(&[[100.0_f32, 0.0]]));
+        gpu.step(1);
+        assert_eq!(gpu.read_positions(1).unwrap()[0], [MAX_DISPLACEMENT, 0.0]);
+        gpu.step(1);
+        assert_eq!(
+            gpu.read_positions(1).unwrap()[0],
+            [MAX_DISPLACEMENT * (1.0 + MOMENTUM_RETENTION), 0.0]
+        );
+
+        crate::births::validate_gpu_births(&mut gpu);
 
         // Connection sizing changes GPU styles and camera bounds, but the same
         // solver inputs must produce bit-identical positions with either view.
@@ -1476,7 +1648,7 @@ mod tests {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("test camera transfer"),
             });
-        encoder.copy_buffer_to_buffer(&gpu.camera, 0, &buffer, 0, 16);
+        encoder.copy_buffer_to_buffer(&gpu.output.camera, 0, &buffer, 0, 16);
         gpu.queue.submit(Some(encoder.finish()));
         let bytes = gpu.map_readback(&buffer).unwrap();
         std::array::from_fn(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))

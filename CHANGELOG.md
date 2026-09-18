@@ -1,5 +1,15 @@
 # Release changes
 
+## 0.1.4
+
+- New nodes without an explicit position appear near the current centre of their already-created connected neighbours, with a small deterministic offset. With no such neighbours, they start near the world origin. Later connections do not teleport existing nodes; explicit initial positions remain supported.
+- Reduced repulsion from 1024 to 512 while retaining default edge strength 4. The `nodiform-force-v3` solver retains 85% of the preceding capped displacement for more fluid, damped motion.
+- Fixed preview pacing to carry fractional elapsed ticks between display refreshes, with bounded catch-up after a stall. Default preview speed remains 240 solver ticks per second; recording preserves every fixed timeline sample.
+- Preview now renders at the canvas's physical pixel resolution, including desktop scaling, independently of video settings. Resizing and display scaling update it even while paused.
+- Changed the simulation background to pure black. Preview and export use independent textures and camera histories, so resizing the preview does not affect a recording's framing history or output resolution.
+
+Existing projects and rule scripts remain supported. Reruns use the new force model and `live-neighbour-centroid-v2` birth policy, so their trajectories can differ from earlier versions. New recording manifests identify both policies. The AppImage continues to use the existing Gear Lever update channel.
+
 ## 0.1.3
 
 - Added System, Light and Dark appearance, remembered between launches, including matching editor syntax colours and input controls.

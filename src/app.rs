@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod playback;
 mod ui;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -89,6 +90,9 @@ pub struct NodiformApp {
     status: String,
     error: Option<String>,
     last_sample: Instant,
+    preview_clock: playback::PreviewClock,
+    preview_dirty: bool,
+    preview_pixels: (u32, u32),
     adapter: String,
     inspector: usize,
     inspected_position: Option<[f32; 2]>,
@@ -114,6 +118,9 @@ impl NodiformApp {
             crate::theme::restore(cc.storage)
         };
         crate::theme::configure(&cc.egui_ctx, theme_preference);
+        if smoke_probe.is_some() && std::env::var("NODIFORM_SMOKE_HIDPI").as_deref() == Ok("1") {
+            cc.egui_ctx.set_pixels_per_point(2.0);
+        }
         let render_state = cc
             .wgpu_render_state
             .clone()
@@ -126,10 +133,10 @@ impl NodiformApp {
         );
         let graph = Graph::new(42);
         gpu.sync_graph(&graph, true);
-        gpu.render(1280, 720);
+        gpu.render_preview(1, 1);
         let texture = render_state.renderer.write().register_native_texture(
             &render_state.device,
-            gpu.view(),
+            gpu.preview_view(),
             wgpu::FilterMode::Linear,
         );
         let project = Project::default();
@@ -160,6 +167,9 @@ impl NodiformApp {
             status: "Your rules, your structure. Edit the script, then choose Preview.".into(),
             error: None,
             last_sample: Instant::now(),
+            preview_clock: playback::PreviewClock::default(),
+            preview_dirty: true,
+            preview_pixels: (1, 1),
             adapter,
             inspector: 0,
             inspected_position: None,
@@ -247,11 +257,13 @@ impl NodiformApp {
         let result = self.error.clone().map_or_else(
             || {
                 Ok(format!(
-                    "{} GUI updates, {} ticks, {} nodes, {} edges; {}",
+                    "{} GUI updates, {} ticks, {} nodes, {} edges; preview {} × {} physical pixels; {}",
                     frames,
                     self.tick,
                     self.graph.nodes.len(),
                     self.graph.edges.len(),
+                    self.preview_pixels.0,
+                    self.preview_pixels.1,
                     self.adapter
                 ))
             },
@@ -279,8 +291,11 @@ impl NodiformApp {
         {
             return Err("GPU physics did not move any nodes.".into());
         }
-        let pixels = self.gpu.read_rgba()?;
-        let (width, height) = self.gpu.dimensions();
+        let pixels = self.gpu.read_preview_rgba()?;
+        let (width, height) = self.gpu.preview_dimensions();
+        if (width, height) != self.preview_pixels {
+            return Err("Preview texture does not match the canvas's physical pixels.".into());
+        }
         if pixels.len() != width as usize * height as usize * 4
             || !pixels
                 .as_chunks::<4>()
@@ -341,11 +356,11 @@ impl NodiformApp {
             let metadata = json!({
                 "app_version":env!("CARGO_PKG_VERSION"), "project":snapshot,
                 "source_sha256":format!("{:x}", Sha256::digest(snapshot.source.as_bytes())),
-                "adapter":self.adapter, "force_profile":"nodiform-exact-v1",
+                "adapter":self.adapter, "force_profile":crate::model::FORCE_VERSION,
                 "rule_api":crate::rules::RULE_API_VERSION,
                 "effective_parameters": effective_parameters,
                 "node_size_rule":if snapshot.size_by_connections { "obsidian-global-sqrt-uncapped-v1" } else { "rule-radius" },
-                "forces":{"version":crate::model::FORCE_VERSION,"repulsion":crate::model::REPULSION,"default_edge_strength":crate::model::DEFAULT_EDGE_STRENGTH,"softening_squared":crate::model::SOFTENING_SQUARED,"rest_length":0,"gravity":0,"max_displacement":crate::model::MAX_DISPLACEMENT,"base_timestep":crate::model::BASE_TIMESTEP,"step_policy":"min(base_timestep,0.5/max_incident_strength)"},
+                "forces":{"version":crate::model::FORCE_VERSION,"repulsion":crate::model::REPULSION,"default_edge_strength":crate::model::DEFAULT_EDGE_STRENGTH,"softening_squared":crate::model::SOFTENING_SQUARED,"rest_length":0,"gravity":0,"momentum_retention":crate::model::MOMENTUM_RETENTION,"max_displacement":crate::model::MAX_DISPLACEMENT,"base_timestep":crate::model::BASE_TIMESTEP,"step_policy":"min(base_timestep,0.5/max_incident_strength)"},
                 "birth_placement":crate::model::BIRTH_PLACEMENT_VERSION,
                 "ticks_per_frame":snapshot.ticks_per_frame,
                 "planned_ticks":plan.total_ticks + u64::from(snapshot.tail_ticks),
@@ -379,7 +394,8 @@ impl NodiformApp {
         self.last_event = 0;
         self.inspected_position = None;
         self.components = 0;
-        self.last_sample = Instant::now() - Duration::from_secs(1);
+        self.reset_preview_clock();
+        self.preview_dirty = true;
         self.status = if self.recorder.is_some() {
             "Recording every frame. Slower computation stretches wall time, not the movie."
         } else {
@@ -398,6 +414,7 @@ impl NodiformApp {
         self.prepared_run = None;
         self.timeline = None;
         self.paused = false;
+        self.reset_preview_clock();
         // An already rendered frame must reach the encoder before its channel is closed.
         if self.pending_frame.is_none() {
             self.finish_recording();
@@ -431,26 +448,39 @@ impl NodiformApp {
             "nodes":self.graph.nodes.len(),"edges":self.graph.edges.len(),"error":self.error})
     }
 
-    fn render(&mut self) {
-        let old = self.gpu.dimensions();
-        self.gpu
-            .render(self.project.recording.width, self.project.recording.height);
-        if old != self.gpu.dimensions() {
+    fn render_preview(&mut self, canvas_size: egui::Vec2, pixels_per_point: f32) {
+        let size = playback::preview_dimensions(
+            canvas_size,
+            pixels_per_point,
+            self.render_state.device.limits().max_texture_dimension_2d,
+        );
+        self.preview_pixels = size;
+        let old = self.gpu.preview_dimensions();
+        if !self.preview_dirty && old == size {
+            return;
+        }
+        self.gpu.render_preview(size.0, size.1);
+        self.preview_dirty = false;
+        if old != self.gpu.preview_dimensions() {
             self.render_state
                 .renderer
                 .write()
                 .update_egui_texture_from_wgpu_texture(
                     &self.render_state.device,
-                    self.gpu.view(),
+                    self.gpu.preview_view(),
                     wgpu::FilterMode::Linear,
                     self.texture,
                 );
         }
     }
 
-    fn advance_frame(&mut self) -> Result<(), String> {
+    fn reset_preview_clock(&mut self) {
+        self.last_sample = Instant::now();
+        self.preview_clock.reset();
+    }
+
+    fn advance_ticks(&mut self, mut budget: u32) -> Result<(), String> {
         self.inspected_position = None;
-        let mut budget = self.project.ticks_per_frame;
         while budget > 0 {
             let Some(timeline) = &mut self.timeline else {
                 break;
@@ -481,8 +511,15 @@ impl NodiformApp {
                 self.components = self.graph.component_count();
             }
         }
-        self.render();
+        self.preview_dirty = true;
+        Ok(())
+    }
+
+    fn advance_frame(&mut self) -> Result<(), String> {
+        self.advance_ticks(self.project.ticks_per_frame)?;
         if self.recorder.is_some() {
+            self.gpu
+                .render(self.project.recording.width, self.project.recording.height);
             self.pending_frame = Some(self.gpu.read_rgba()?);
         }
         Ok(())
@@ -571,16 +608,30 @@ impl NodiformApp {
             }
             return;
         }
-        if !self.paused
-            && !self.finishing
-            && self.last_sample.elapsed()
-                >= Duration::from_secs_f64(1.0 / f64::from(self.project.recording.fps))
-        {
-            if let Err(error) = self.advance_frame() {
-                self.error = Some(error);
-                self.stop();
+        if self.paused || self.finishing {
+            self.reset_preview_clock();
+            return;
+        }
+        // Recording samples every fixed interval and honours encoder pressure.
+        // Preview instead follows elapsed time at the monitor's refresh rate.
+        let result = if self.recorder.is_some() {
+            self.advance_frame()
+        } else {
+            let now = Instant::now();
+            let elapsed = now.duration_since(self.last_sample);
+            self.last_sample = now;
+            let ticks = self.preview_clock.ticks(
+                elapsed,
+                self.project.recording.fps * self.project.ticks_per_frame,
+            );
+            if ticks == 0 {
+                return;
             }
-            self.last_sample = Instant::now();
+            self.advance_ticks(ticks)
+        };
+        if let Err(error) = result {
+            self.error = Some(error);
+            self.stop();
         }
     }
 
@@ -625,8 +676,7 @@ impl NodiformApp {
                         serde_json::to_string_pretty(&project.parameters).unwrap();
                     self.project = project;
                     self.gpu.set_degree_sizing(self.project.size_by_connections);
-                    let (width, height) = self.gpu.dimensions();
-                    self.gpu.render(width, height);
+                    self.preview_dirty = true;
                     self.project_path = Some(path);
                     self.status = "Project opened. Validate or preview when ready.".into();
                     self.error = None;
@@ -678,7 +728,12 @@ impl eframe::App for NodiformApp {
                     });
                 });
         }
-        if self.busy() {
+        if self.timeline.as_ref().is_some_and(|time| !time.finished())
+            && !self.paused
+            && !self.finishing
+        {
+            ctx.request_repaint();
+        } else if self.busy() {
             ctx.request_repaint_after(Duration::from_millis(8));
         }
         // Keep the event loop alive while FFmpeg drains on close.

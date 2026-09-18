@@ -1,6 +1,6 @@
 # Architecture and experiment semantics
 
-Nodiform separates the experiment, its playback, the GPU solver, and the encoder. The native desktop interface uses egui/eframe; GPU work uses wgpu. The same offscreen graph image is suitable for the live view and video readback.
+Nodiform separates the experiment, its playback, the GPU solver, and the encoder. The native desktop interface uses egui/eframe; GPU work uses wgpu. Preview and video use the same render pipeline with independent offscreen images and camera histories.
 
 ## Rule compilation and the event model
 
@@ -14,13 +14,19 @@ Generation order and simulation time are independent. Mutation events take no ti
 
 ## GPU state and forces
 
-Node positions live in GPU buffers. Graph updates append birth positions and update style or connectivity without overwriting existing nodes' evolved positions. The solver alternates read and write position buffers so one tick uses a coherent input state.
+Node positions live in GPU buffers. Graph updates append birth positions and update style or connectivity without overwriting existing nodes' evolved positions. The solver alternates read and write position buffers so one tick uses a coherent input state. A separate momentum buffer stores each node's preceding capped displacement; newly created nodes begin with zero momentum.
 
-Repulsion is evaluated over all pairs with short-distance softening. Attraction is gathered from incident edges using their current nonnegative strengths. Springs have zero rest length. Motion is overdamped and limited per step for numerical stability. There is no hidden gravity or centring force.
+The `live-neighbour-centroid-v2` birth policy resolves new nodes in insertion order on the GPU. A node without an explicit `position` starts at the unweighted mean of its connected predecessors' **current** positions, plus a seed-and-ID-derived offset in `[-1, 1)` world units on each axis. Parallel and reciprocal edges count as one neighbour for this mean; edge strength, including zero, does not affect placement. A node without connected predecessors uses the world origin plus the same small offset. This offset reduces exact coincidences, where repulsion has no direction. Explicit coordinates bypass automatic placement exactly.
 
-`nodiform-force-v2` uses repulsion 1024, softening squared 0.25, maximum displacement 2 per tick, and default edge strength 4. These increase repulsion 16-fold and default attraction 4-fold over version 0.1.2. Explicit script strengths are honoured. For an isolated pair with one edge of strength `s > 0`, a nonzero equilibrium satisfies `distance² = 1024 / s − 0.25`, when positive. This pair calculation does not predict the edge lengths of a general graph. Previously saved experiments run with the new force model; manifests record its version and coefficients.
+Playback coalesces mutations at the same simulated time before synchronising the graph. Birth placement uses all connections present at that synchronisation, but only lower insertion indices can anchor a new node. This includes earlier births in the same synchronisation; later births cannot anchor earlier ones. A connection added after a positive wait cannot relocate a node already born. The GPU pass writes each birth to both position buffers without reading positions back to the CPU or moving existing nodes.
 
-The numerical mobility per tick is `min(1/120, 0.5 / maximum incident strength sum)`, using `1/120` when there is no positive attraction. Increasing edge weights can therefore reduce the step size for the whole graph. This is a stability precaution for the force update, not a change to video frame rate or event scheduling. The displacement cap remains a separate safeguard; neither guarantees monotonic energy descent.
+Repulsion is evaluated over all pairs with short-distance softening. Attraction is gathered from incident edges using their current nonnegative strengths. Springs have zero rest length. Motion uses damped momentum and a displacement limit. There is no hidden gravity or centring force.
+
+`nodiform-force-v3` uses repulsion 512, softening squared 0.25, maximum displacement 2 per tick, default edge strength 4, and momentum retention 0.85. Version 0.1.4 halves repulsion relative to 0.1.3 and leaves edge defaults unchanged. Explicit script strengths are honoured. Each tick adds the force-driven increment to 85% of the previous capped displacement, caps the resulting movement, then stores that capped movement as the next tick's momentum. This is displacement memory per tick, not velocity in world units per second; storing the capped result prevents momentum from accumulating behind the cap.
+
+For an isolated pair with one edge of strength `s > 0`, a nonzero stationary equilibrium satisfies `distance² = 512 / s − 0.25`, when positive. This pair calculation does not predict the edge lengths of a general graph or guarantee that a discrete trajectory converges. Previously saved experiments run with the new force model and birth policy; manifests record their versions and the force coefficients.
+
+The force multiplier per tick is `min(1/120, 0.5 / maximum incident strength sum)`, using `1/120` when there is no positive attraction. Increasing edge weights can therefore reduce the force-driven increment for the whole graph. This is a stability precaution for the force update, not a change to video frame rate or event scheduling. Momentum can carry nodes past a relaxed configuration while damping reduces that motion. The displacement cap remains a separate safeguard; neither guarantees monotonic energy descent.
 
 The exact all-pairs calculation costs O(N²) for repulsion. Edge attraction uses adjacency data rather than a dense edge matrix. The current caps of 8,192 nodes and 250,000 edges bound resource use; GPU buffers reserve these capacities at initialisation. They are not throughput targets. A future approximate solver would need explicit accuracy and reproducibility controls rather than silently replacing this model.
 
@@ -54,11 +60,19 @@ Repulsion and attraction can compete to create relaxed structures without introd
 
 Disconnected components have no attractive connection holding them at a finite distance. With continuing all-pair repulsion and no gravity, they can separate indefinitely. A zero-strength edge does not bind components. Auto-fit keeps an expanding graph visible but does not solve that physical non-equilibrium. Bounded experiments on disconnected graphs remain useful; interpret continued separation correctly.
 
-Order, birth positions, pauses between events, and the final relaxation interval can all affect the observed structure. Cross-GPU floating-point execution can change trajectories, even when the event plan and seed match. The seed guarantees the intended deterministic rule randomness and default birth placement, not universal bit-identical physics.
+Order, birth positions, pauses between events, and the final relaxation interval can all affect the observed structure. Cross-GPU floating-point execution can change trajectories, even when the event plan and seed match. The seed fixes rule randomness and each automatic birth offset. The complete birth position also depends on its connected predecessors, their evolving positions, and timing; it is no longer an ID-and-seed-only coordinate. Matching a seed does not guarantee universal bit-identical physics.
+
+## Live preview
+
+The preview texture matches the canvas's physical pixel dimensions: logical UI size multiplied by the current pixels-per-point scale. It updates after a window resize or scale change, even while paused. If either dimension would exceed the GPU texture limit, both dimensions scale down together to preserve the aspect ratio. The clear colour is opaque black in both preview and recording. Preview and export have independent textures and camera histories, so preview resizing and display refresh cadence cannot alter recorded resolution or camera smoothing.
+
+Interactive playback targets `video fps × ticks per frame` solver ticks per wall-clock second, which is 240 with the defaults. It requests a repaint each available display frame and carries fractional ticks between updates. The previous frame-rate gate reset its timer after each sample, discarding fractional elapsed time; combined with the old solver's lack of momentum, that could make motion feel sluggish.
+
+Catch-up considers at most 100 ms of elapsed time and advances at most 240 ticks per UI update. Pausing, resuming and stepping reset the clock. Sustained overload therefore slows the preview instead of accumulating unbounded catch-up work; it does not skip rule events or solver ticks within the simulated timeline. These limits apply to preview pacing, not to the fixed samples written for recording.
 
 ## Fixed-timeline recording
 
-A formal run captures its source and parameters instead of reading ongoing editor changes. Fixed simulation ticks determine output samples. Wall-clock rendering speed is not the simulation clock.
+A formal run captures its source and parameters instead of reading ongoing editor changes. Fixed simulation ticks determine output samples at the configured video resolution, independently of preview dimensions. Wall-clock rendering speed is not the simulation clock. Recording advances an output sample when the encoder can accept it, rather than waiting for a display-frame timer.
 
 RGBA frames are read from the GPU with row-padding handled explicitly, then streamed to FFmpeg through a bounded queue. When that queue fills, playback must retain the pending sample and stop advancing until the encoder accepts it. This backpressure is what makes slower-than-real-time recording possible without intentionally omitting timeline samples.
 

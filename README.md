@@ -2,7 +2,7 @@
 
 A native laboratory for emergent graphs. Write rules, choose the order in which a graph grows, and watch its structure develop in two dimensions.
 
-Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.3 adds dark mode, stronger forces, perceptual colour palettes, and live endpoint-gradient edges. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
+Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.4 adds births near connected neighbours, more fluid motion, and a sharp, monitor-scaled preview on a black background. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
 
 ## What this version does
 
@@ -11,15 +11,16 @@ Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. 
 - Applies code-defined colours, world-space node radii, and edge strengths, including changes later in a run.
 - Generates vivid hex palettes in a perceptual colour space with `graph.palette(count)` or `N.palette(count)`.
 - Blends gradient edges between their endpoint colours, following later node colour changes.
-- Calculates repulsion and weighted attraction on the GPU, and renders the graph on the GPU.
+- Places each new node near its already-created neighbours using their current positions, or near the world origin when none exist. Scripts can override the initial position.
+- Calculates repulsion and weighted attraction on the GPU, with damped momentum, and renders the graph on the GPU.
 - Fits the whole graph into the view. Nodes become smaller on screen as the camera zooms out.
 - Provides a syntax-coloured rule editor, line numbers, snippets, starter examples, and an in-app API reference.
-- Offers **Preview** and **Record** actions; recording streams fixed-timeline video to FFmpeg.
+- Offers **Preview** at the canvas’s physical pixel resolution and **Record** at an independent output resolution; recording streams fixed-timeline video to FFmpeg.
 - Optionally sizes nodes by connection count without changing the simulation's forces.
 
 The default experiment is a small eight-node chain with no required inputs. **Experiment → Examples** contains a graph in which each new node connects to every earlier node, letter permutations, a growing ring, and modular residues. The complete-growth example creates 500 nodes and 124,750 edges. These are editable experiments, not fixed application modes.
 
-The native egui interface offers **Settings → Appearance → System / Light / Dark**, with matching editor colours and controls. The theme is remembered separately from experiments and does not change recorded graph colours. Rounded cards and blue accents surround a dark simulation canvas.
+The native egui interface offers **Settings → Appearance → System / Light / Dark**, with matching editor colours and controls. The theme is remembered separately from experiments and does not change recorded graph colours. Rounded cards and blue accents surround a pure black simulation canvas.
 
 ## Run the desktop app
 
@@ -48,7 +49,9 @@ The rule editor is the source of truth. Define `function build(graph, p)` and us
 
 Use **Experiment → Open…** and **Save…** to keep a `.nodiform.json` project containing the source, inputs, seed, and run/recording settings. This saves an experiment definition, not the current moving graph or a resume checkpoint. Older project files still open; connection-based sizing defaults to off if absent. **Choose video folder…** in Settings sets the recording destination; the default is `Videos/Nodiform` under your home directory, with a separate uniquely named folder for each run. Runs write `simulation.mkv` and `manifest.json`; `run-outcome.json` records whether the simulation completed its planned timeline or stopped early.
 
-The initial app settings use 1280 × 720 output at 60 fps, four solver ticks per frame, and 240 extra relaxation ticks after the generated plan. Higher output resolutions increase readback bandwidth, encoding cost, and disk use without changing the graph's rules.
+The initial app settings use 1280 × 720 video output at 60 fps, four solver ticks per frame, and 240 extra relaxation ticks after the generated plan. Preview targets 240 solver ticks per second with these settings, retaining fractional elapsed ticks between display refreshes. A slow frame has bounded catch-up work, so sustained overload slows playback instead of building an ever-growing queue.
+
+The preview matches the canvas’s physical pixel dimensions, including desktop scaling, independently of the video resolution. Resizing the window or moving it between differently scaled displays updates the preview. Extremely large canvases are scaled down to the GPU texture limit. Higher video resolutions increase readback bandwidth, encoding cost, and disk use without changing preview sharpness or graph rules.
 
 ## Build from source
 
@@ -88,7 +91,9 @@ The first solver evaluates every pair of nodes, so repulsion costs **O(N²)** pe
 
 Forces consist of softened repulsion and weighted zero-rest-length attraction. There is no centring gravity. The camera follows the graph without applying a force to it. Disconnected attraction components can therefore drift apart indefinitely. Zero-strength edges do not hold components together.
 
-Version 0.1.3 raises the repulsion coefficient from 64 to 1024 and the default edge strength from 1 to 4. Explicit strengths in saved scripts remain unchanged; every run uses the new repulsion. For one isolated default-strength edge, the equilibrium separation is about twice its previous value. Auto-fit still frames the whole graph, so greater world-space separation also makes fixed-radius nodes appear smaller.
+Version 0.1.4 reduces the repulsion coefficient from 1024 to 512, keeps the default edge strength at 4, and retains 85% of the preceding tick’s capped movement before adding the next force-driven increment. The earlier solver discarded all momentum each tick, which contributed to its sluggish feel. Preview timing also now carries fractional elapsed time instead of losing it at frame boundaries. Explicit edge strengths remain unchanged; saved experiments use the new `nodiform-force-v3` model when rerun.
+
+Automatic births use the unweighted centre of connected nodes created earlier in the sequence, plus a small deterministic offset of less than or equal to one world unit per axis. With no such neighbours they start near `[0, 0]`. Connections created after a simulation wait do not reposition existing nodes. The seed fixes the offset, while birth order, waits, and the neighbours’ live positions also determine the resulting location. Supply `position: [x, y]` to choose an exact initial location.
 
 The solver seeks relaxed configurations but does not promise a global minimum, monotonic energy reduction on every discrete step, or identical floating-point trajectories across different GPUs and drivers. The creation order and waits are deliberate parts of an experiment. See [architecture and scientific caveats](docs/architecture.md).
 

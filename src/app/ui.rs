@@ -1,8 +1,9 @@
 use super::*;
 
 use crate::theme::Palette;
+use egui::emath::GuiRounding;
 
-const CANVAS: egui::Color32 = egui::Color32::from_rgb(10, 18, 24);
+const CANVAS: egui::Color32 = egui::Color32::BLACK;
 
 fn card(p: Palette) -> egui::Frame {
     egui::Frame::new()
@@ -259,17 +260,11 @@ impl NodiformApp {
                 );
                 let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
                 ui.painter().rect_filled(rect, 24, CANVAS);
-                let inner = rect.shrink(16.0);
-                let aspect = self.gpu.dimensions().0 as f32 / self.gpu.dimensions().1 as f32;
-                let size = if inner.width() / inner.height() > aspect {
-                    egui::vec2(inner.height() * aspect, inner.height())
-                } else {
-                    egui::vec2(inner.width(), inner.width() / aspect)
-                };
-                let image_rect = egui::Rect::from_center_size(inner.center(), size);
+                let inner = rect.shrink(16.0).round_to_pixels(ctx.pixels_per_point());
+                self.render_preview(inner.size(), ctx.pixels_per_point());
                 ui.painter().image(
                     self.texture,
-                    image_rect,
+                    inner,
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
@@ -334,10 +329,12 @@ impl NodiformApp {
                 .on_hover_text("Advance one output-frame interval")
                 .clicked()
             {
+                self.reset_preview_clock();
                 if let Err(error) = self.advance_frame() {
                     self.error = Some(error);
                     self.stop();
                 }
+                ui.ctx().request_repaint();
             }
             if ui
                 .add_enabled(
@@ -347,6 +344,7 @@ impl NodiformApp {
                 .clicked()
             {
                 self.paused = !self.paused;
+                self.reset_preview_clock();
             }
         });
     }
@@ -444,8 +442,8 @@ impl NodiformApp {
                     if let Some((_, snapshot)) = &mut self.pending_run {
                         snapshot.size_by_connections = self.project.size_by_connections;
                     }
-                    let (width, height) = self.gpu.dimensions();
-                    self.gpu.render(width, height);
+                    self.preview_dirty = true;
+                    ctx.request_repaint();
                 }
                 ui.label(egui::RichText::new("Connection count changes appearance only. Node sizes still follow the zoom level.").size(12.0).color(p.secondary));
                 ui.add_space(10.0);
@@ -458,6 +456,7 @@ impl NodiformApp {
                     ui.add_space(10.0);
                     ui.separator();
                     ui.label(egui::RichText::new("Recording").strong());
+                    ui.label(egui::RichText::new("Preview follows your display resolution. These settings control the saved video.").size(12.0).color(p.secondary));
                     egui::ComboBox::from_id_salt("resolution").selected_text(format!("{} × {}", self.project.recording.width, self.project.recording.height)).show_ui(ui, |ui| {
                         for (width, height) in [(1280, 720), (1920, 1080), (3840, 2160)] {
                             if ui.selectable_label(self.project.recording.width == width, format!("{width} × {height}")).clicked() { self.project.recording.width = width; self.project.recording.height = height; }

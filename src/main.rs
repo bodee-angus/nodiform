@@ -1,4 +1,5 @@
 mod app;
+mod births;
 mod diagnostics;
 mod editor;
 mod experiment;
@@ -35,12 +36,16 @@ fn main() -> eframe::Result {
     };
     let mut wgpu_setup = eframe::egui_wgpu::WgpuSetupCreateNew::default();
     wgpu_setup.instance_descriptor.backends = eframe::wgpu::Backends::VULKAN;
-    let window_size =
-        if smoke_test.is_some() && std::env::var("NODIFORM_SMOKE_COMPACT").as_deref() == Ok("1") {
-            [1024.0, 700.0]
-        } else {
-            [1500.0, 940.0]
-        };
+    let window_size = if smoke_test.is_some()
+        && std::env::var("NODIFORM_SMOKE_HIDPI").as_deref() == Ok("1")
+    {
+        [3000.0, 1880.0]
+    } else if smoke_test.is_some() && std::env::var("NODIFORM_SMOKE_COMPACT").as_deref() == Ok("1")
+    {
+        [1024.0, 700.0]
+    } else {
+        [1500.0, 940.0]
+    };
     let options = eframe::NativeOptions {
         persist_window: smoke_test.is_none(),
         renderer: eframe::Renderer::Wgpu,

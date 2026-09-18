@@ -101,6 +101,7 @@ pub struct NodiformApp {
     show_settings: bool,
     show_inspector: bool,
     smoke_frame_checked: bool,
+    smoke_idle_since: Option<Instant>,
 }
 
 impl NodiformApp {
@@ -161,6 +162,7 @@ impl NodiformApp {
             show_settings: false,
             show_inspector: false,
             smoke_frame_checked: false,
+            smoke_idle_since: None,
         };
         if app.smoke_probe.is_some() {
             if let Ok(example) = std::env::var("NODIFORM_SMOKE_EXAMPLE") {
@@ -205,14 +207,22 @@ impl NodiformApp {
                 self.error = Some(error);
             }
             self.smoke_frame_checked = true;
-            // Keep the simulated graph, then draw one fully editable idle
-            // frame before capturing the actual interface.
+            // Keep the simulated graph, then let idle controls and window
+            // animations settle before capturing the actual interface.
             self.stop();
+            self.smoke_idle_since = Some(Instant::now());
             self.status = "Preview checked. Your experiment is ready to edit.".into();
             ctx.request_repaint();
             return;
         }
         if self.error.is_none() {
+            if self
+                .smoke_idle_since
+                .is_some_and(|since| since.elapsed() < Duration::from_millis(300))
+            {
+                ctx.request_repaint_after(Duration::from_millis(16));
+                return;
+            }
             match self.smoke_probe.as_mut().unwrap().capture(ctx) {
                 Ok(false) => {
                     ctx.request_repaint();

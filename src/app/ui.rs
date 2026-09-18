@@ -426,7 +426,7 @@ impl NodiformApp {
         }
         let mut open = self.show_settings;
         let mut done = false;
-        egui::Window::new("Settings").open(&mut open).title_bar(false).resizable(false).frame(card().inner_margin(20)).default_width(390.0).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 90.0)).show(ctx, |ui| {
+        egui::Window::new("Settings").open(&mut open).title_bar(false).resizable(false).frame(card().fill(egui::Color32::from_rgb(250, 252, 255)).inner_margin(20)).default_width(390.0).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 90.0)).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Settings").size(22.0).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

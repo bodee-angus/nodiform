@@ -1,0 +1,49 @@
+name: Linux build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    name: Test and package Linux x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config libxkbcommon-dev libwayland-dev libx11-dev libudev-dev ffmpeg mesa-vulkan-drivers
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Exercise GPU pipelines with software Vulkan
+        env:
+          XDG_RUNTIME_DIR: /tmp
+        run: cargo test --locked gpu::tests::headless_gpu_smoke -- --ignored --nocapture
+
+      - name: Build release executable
+        run: cargo build --release --locked
+
+      - name: Package portable archive
+        run: bash packaging/package-linux.sh
+
+      - name: Upload portable archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodiform-linux-x86_64
+          path: dist/nodiform-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14

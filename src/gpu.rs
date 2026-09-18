@@ -1,0 +1,1019 @@
+//! Strictly 2D, all-GPU simulation and rendering on eframe's existing device.
+//!
+//! Force v1 uses rho=64, epsilon²=0.25 and a 2-world-unit displacement cap.
+//! Its shared timestep is min(1/120, 0.5 / maximum weighted node degree),
+//! with 1/120 used when all incident-strength sums are zero. Recomputed on
+//! each graph sync, this scalar limits attraction stiffness without adding
+//! forces or changing their relative weights. Every node has the same charge.
+//! Springs have zero rest length; visual radii do not change forces. This
+//! attraction safeguard is not a proof of energy-monotonic descent for the
+//! full repulsion-plus-attraction scheme or of finding a global minimum.
+//!
+//! Repulsion is exact O(N²), attraction is O(E). This bounded first engine is
+//! not a Barnes-Hut implementation and has no claimed hardware throughput.
+
+use std::sync::{mpsc, Arc};
+
+use bytemuck::{Pod, Zeroable};
+use eframe::wgpu::{self, util::DeviceExt};
+
+use crate::model::Graph;
+
+pub const MAX_NODES: usize = 8192;
+pub const MAX_EDGES: usize = 100_000;
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct NodeStyle {
+    color: [f32; 4],
+    radius: f32,
+    padding: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuEdge {
+    source: u32,
+    target: u32,
+    strength: f32,
+    padding: u32,
+    color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Neighbour {
+    other: u32,
+    padding0: u32,
+    strength: f32,
+    padding1: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct PhysicsParameters {
+    count: u32,
+    padding: [u32; 3],
+    repulsion: f32,
+    dt: f32,
+    softening_squared: f32,
+    max_displacement: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FrameParameters {
+    width: f32,
+    height: f32,
+    count: u32,
+    edges: u32,
+}
+
+pub struct GpuGraph {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    positions: [wgpu::Buffer; 2],
+    styles: wgpu::Buffer,
+    edges: wgpu::Buffer,
+    offsets: wgpu::Buffer,
+    neighbours: wgpu::Buffer,
+    physics_parameters: wgpu::Buffer,
+    frame_parameters: wgpu::Buffer,
+    camera: wgpu::Buffer,
+    physics_pipeline: wgpu::ComputePipeline,
+    bounds_pipeline: wgpu::ComputePipeline,
+    node_pipeline: wgpu::RenderPipeline,
+    edge_pipeline: wgpu::RenderPipeline,
+    physics_groups: [wgpu::BindGroup; 2],
+    bounds_groups: [wgpu::BindGroup; 2],
+    render_groups: [wgpu::BindGroup; 2],
+    active: usize,
+    node_count: usize,
+    edge_count: usize,
+    effective_dt: f32,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    dimensions: (u32, u32),
+}
+
+impl GpuGraph {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        let positions =
+            std::array::from_fn(|_| storage(&device, "node positions", MAX_NODES * 8, true));
+        let styles = storage(&device, "node styles", MAX_NODES * 32, false);
+        let edges = storage(&device, "edges", MAX_EDGES * 32, false);
+        let offsets = storage(&device, "adjacency offsets", (MAX_NODES + 1) * 4, false);
+        let neighbours = storage(&device, "adjacency entries", MAX_EDGES * 2 * 16, false);
+        let camera = storage(&device, "auto-fit camera", 16, true);
+        let physics_parameters = uniform(
+            &device,
+            "force parameters",
+            &PhysicsParameters {
+                count: 0,
+                padding: [0; 3],
+                repulsion: 64.0,
+                dt: 1.0 / 120.0,
+                softening_squared: 0.25,
+                max_displacement: 2.0,
+            },
+        );
+        let frame_parameters = uniform(
+            &device,
+            "frame parameters",
+            &FrameParameters {
+                width: 1280.0,
+                height: 720.0,
+                count: 0,
+                edges: 0,
+            },
+        );
+
+        let compute = wgpu::ShaderStages::COMPUTE;
+        let vertex = wgpu::ShaderStages::VERTEX;
+        let physics_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("force layout"),
+            entries: &[
+                buffer_layout(0, compute, true, false),
+                buffer_layout(1, compute, false, false),
+                buffer_layout(2, compute, true, false),
+                buffer_layout(3, compute, true, false),
+                buffer_layout(4, compute, true, true),
+            ],
+        });
+        let bounds_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bounds layout"),
+            entries: &[
+                buffer_layout(0, compute, true, false),
+                buffer_layout(1, compute, true, false),
+                buffer_layout(2, compute, false, false),
+                buffer_layout(3, compute, true, true),
+            ],
+        });
+        let render_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("graph rendering layout"),
+            entries: &[
+                buffer_layout(0, vertex, true, false),
+                buffer_layout(1, vertex, true, false),
+                buffer_layout(2, vertex, true, false),
+                buffer_layout(3, vertex, true, false),
+                buffer_layout(4, vertex, true, true),
+            ],
+        });
+        let physics_groups = std::array::from_fn(|i| {
+            bind_group(
+                &device,
+                "force bindings",
+                &physics_layout,
+                &[
+                    &positions[i],
+                    &positions[1 - i],
+                    &offsets,
+                    &neighbours,
+                    &physics_parameters,
+                ],
+            )
+        });
+        let bounds_groups = std::array::from_fn(|i| {
+            bind_group(
+                &device,
+                "bounds bindings",
+                &bounds_layout,
+                &[&positions[i], &styles, &camera, &frame_parameters],
+            )
+        });
+        let render_groups = std::array::from_fn(|i| {
+            bind_group(
+                &device,
+                "render bindings",
+                &render_layout,
+                &[&positions[i], &styles, &edges, &camera, &frame_parameters],
+            )
+        });
+
+        let physics_shader = shader(
+            &device,
+            "force shader",
+            include_str!("shaders/physics.wgsl"),
+        );
+        let bounds_shader = shader(
+            &device,
+            "bounds shader",
+            include_str!("shaders/bounds.wgsl"),
+        );
+        let render_shader = shader(
+            &device,
+            "render shader",
+            include_str!("shaders/render.wgsl"),
+        );
+        let physics_pipeline =
+            compute_pipeline(&device, "force pipeline", &physics_layout, &physics_shader);
+        let bounds_pipeline =
+            compute_pipeline(&device, "bounds pipeline", &bounds_layout, &bounds_shader);
+        let render_pipeline_layout =
+            pipeline_layout(&device, "render pipeline layout", &render_layout);
+        let node_pipeline = render_pipeline(
+            &device,
+            "node pipeline",
+            &render_pipeline_layout,
+            &render_shader,
+            "node_vertex",
+            "node_fragment",
+        );
+        let edge_pipeline = render_pipeline(
+            &device,
+            "edge pipeline",
+            &render_pipeline_layout,
+            &render_shader,
+            "edge_vertex",
+            "edge_fragment",
+        );
+        let dimensions = (1280, 720);
+        let texture = output_texture(&device, dimensions);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            device,
+            queue,
+            positions,
+            styles,
+            edges,
+            offsets,
+            neighbours,
+            physics_parameters,
+            frame_parameters,
+            camera,
+            physics_pipeline,
+            bounds_pipeline,
+            node_pipeline,
+            edge_pipeline,
+            physics_groups,
+            bounds_groups,
+            render_groups,
+            active: 0,
+            node_count: 0,
+            edge_count: 0,
+            effective_dt: 1.0 / 120.0,
+            texture,
+            view,
+            dimensions,
+        }
+    }
+
+    /// Synchronise structure/styles. Existing positions remain untouched unless
+    /// reset=true (or the graph shrinks). New births enter BOTH ping-pong buffers.
+    /// The model must validate endpoints, finite values, and engine capacities.
+    pub fn sync_graph(&mut self, graph: &Graph, reset: bool) {
+        assert!(
+            graph.nodes.len() <= MAX_NODES,
+            "model exceeded GPU node capacity"
+        );
+        assert!(
+            graph.edges.len() <= MAX_EDGES,
+            "model exceeded GPU edge capacity"
+        );
+        let reset = reset || graph.nodes.len() < self.node_count;
+        let first = if reset { 0 } else { self.node_count };
+        if first < graph.nodes.len() {
+            let births: Vec<[f32; 2]> = graph.nodes[first..]
+                .iter()
+                .map(|node| node.position)
+                .collect();
+            for buffer in &self.positions {
+                self.queue
+                    .write_buffer(buffer, (first * 8) as u64, bytemuck::cast_slice(&births));
+            }
+        }
+        if reset {
+            self.active = 0;
+            self.reset_camera();
+        }
+        let styles: Vec<NodeStyle> = graph
+            .nodes
+            .iter()
+            .map(|node| NodeStyle {
+                color: linear_color(node.color),
+                radius: node.radius,
+                padding: [0.0; 3],
+            })
+            .collect();
+        if !styles.is_empty() {
+            self.queue
+                .write_buffer(&self.styles, 0, bytemuck::cast_slice(&styles));
+        }
+        let edges: Vec<GpuEdge> = graph
+            .edges
+            .iter()
+            .map(|edge| {
+                assert!(
+                    edge.source < graph.nodes.len() && edge.target < graph.nodes.len(),
+                    "model supplied invalid edge endpoint"
+                );
+                GpuEdge {
+                    source: edge.source as u32,
+                    target: edge.target as u32,
+                    strength: edge.strength,
+                    padding: 0,
+                    color: linear_color(edge.color),
+                }
+            })
+            .collect();
+        if !edges.is_empty() {
+            self.queue
+                .write_buffer(&self.edges, 0, bytemuck::cast_slice(&edges));
+        }
+        let mut offsets = vec![0u32; graph.nodes.len() + 1];
+        for edge in &graph.edges {
+            offsets[edge.source + 1] += 1;
+            offsets[edge.target + 1] += 1;
+        }
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let mut cursor = offsets.clone();
+        let mut neighbours = vec![Neighbour::zeroed(); graph.edges.len() * 2];
+        for edge in &graph.edges {
+            for (owner, other) in [(edge.source, edge.target), (edge.target, edge.source)] {
+                neighbours[cursor[owner] as usize] = Neighbour {
+                    other: other as u32,
+                    padding0: 0,
+                    strength: edge.strength,
+                    padding1: 0,
+                };
+                cursor[owner] += 1;
+            }
+        }
+        self.queue
+            .write_buffer(&self.offsets, 0, bytemuck::cast_slice(&offsets));
+        if !neighbours.is_empty() {
+            self.queue
+                .write_buffer(&self.neighbours, 0, bytemuck::cast_slice(&neighbours));
+        }
+        self.node_count = graph.nodes.len();
+        self.edge_count = graph.edges.len();
+        self.effective_dt = force_timestep(graph);
+        self.queue.write_buffer(
+            &self.physics_parameters,
+            0,
+            bytemuck::bytes_of(&PhysicsParameters {
+                count: self.node_count as u32,
+                padding: [0; 3],
+                repulsion: 64.0,
+                dt: self.effective_timestep(),
+                softening_squared: 0.25,
+                max_displacement: 2.0,
+            }),
+        );
+    }
+
+    /// The same stiffness-limited scalar applies to every node's full force.
+    /// Timeline ticks remain discrete events, independent of wall-clock time.
+    pub fn effective_timestep(&self) -> f32 {
+        self.effective_dt
+    }
+
+    /// Advance fixed simulation ticks. Callers choose a fixed tick/frame ratio
+    /// during recording and apply timeline events at exact tick boundaries.
+    pub fn step(&mut self, ticks: u32) {
+        if ticks == 0 || self.node_count == 0 {
+            return;
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("simulation ticks"),
+            });
+        for _ in 0..ticks {
+            // Separate passes give explicit storage-write -> storage-read hazards
+            // between ping-pong updates on every supported backend.
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("fixed force tick"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.physics_pipeline);
+                pass.set_bind_group(0, &self.physics_groups[self.active], &[]);
+                pass.dispatch_workgroups((self.node_count as u32).div_ceil(128), 1, 1);
+            }
+            self.active = 1 - self.active;
+        }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    /// Render one camera sample to the offscreen sRGB image. A resize replaces
+    /// the TextureView; the UI must re-register it with its texture renderer.
+    pub fn render(&mut self, width: u32, height: u32) {
+        let dimensions = (width.max(1), height.max(1));
+        if dimensions != self.dimensions {
+            self.texture = output_texture(&self.device, dimensions);
+            self.view = self
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            self.dimensions = dimensions;
+        }
+        let parameters = FrameParameters {
+            width: dimensions.0 as f32,
+            height: dimensions.1 as f32,
+            count: self.node_count as u32,
+            edges: self.edge_count as u32,
+        };
+        self.queue
+            .write_buffer(&self.frame_parameters, 0, bytemuck::bytes_of(&parameters));
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("graph frame"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("strict auto-fit camera"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.bounds_pipeline);
+            pass.set_bind_group(0, &self.bounds_groups[self.active], &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("2D graph render"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0035,
+                            g: 0.006,
+                            b: 0.012,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_bind_group(0, &self.render_groups[self.active], &[]);
+            pass.set_pipeline(&self.edge_pipeline);
+            pass.draw(0..6, 0..self.edge_count as u32);
+            pass.set_pipeline(&self.node_pipeline);
+            pass.draw(0..6, 0..self.node_count as u32);
+        }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    pub fn reset_camera(&mut self) {
+        self.queue
+            .write_buffer(&self.camera, 0, bytemuck::cast_slice(&[0.0f32; 4]));
+    }
+
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+    pub fn dimensions(&self) -> (u32, u32) {
+        self.dimensions
+    }
+
+    /// Explicit synchronous readback for lossless frame delivery to the video
+    /// encoder. The caller must apply backpressure instead of dropping frames.
+    pub fn read_rgba(&self) -> Result<Vec<u8>, String> {
+        let (width, height) = self.dimensions;
+        let unpadded = width * 4;
+        let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let size = u64::from(padded) * u64::from(height);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("video frame readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("video frame transfer"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: self.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        let bytes = self.map_readback(&buffer)?;
+        let mut rgba = Vec::with_capacity((unpadded * height) as usize);
+        for row in bytes.chunks_exact(padded as usize) {
+            rgba.extend_from_slice(&row[..unpadded as usize]);
+        }
+        Ok(rgba)
+    }
+
+    /// Inspector/testing readback only. Normal animation never reads positions
+    /// to the CPU; recording reads pixels but uses the same GPU solver buffers.
+    pub fn read_positions(&self, count: usize) -> Result<Vec<[f32; 2]>, String> {
+        if count > self.node_count {
+            return Err("Requested more positions than the live graph contains".into());
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let size = (count * 8) as u64;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit position readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("position readback"),
+            });
+        encoder.copy_buffer_to_buffer(&self.positions[self.active], 0, &buffer, 0, size);
+        self.queue.submit(Some(encoder.finish()));
+        let bytes = self.map_readback(&buffer)?;
+        // Vec<u8> does not promise f32 alignment, so decode rather than cast it.
+        Ok(bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|bytes| {
+                [
+                    f32::from_le_bytes(bytes[0..4].try_into().expect("four-byte x")),
+                    f32::from_le_bytes(bytes[4..8].try_into().expect("four-byte y")),
+                ]
+            })
+            .collect())
+    }
+
+    fn map_readback(&self, buffer: &wgpu::Buffer) -> Result<Vec<u8>, String> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        let _ = self.device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .map_err(|error| format!("GPU mapping callback was lost: {error}"))?
+            .map_err(|error| format!("GPU readback failed: {error}"))?;
+        let bytes = buffer.slice(..).get_mapped_range().to_vec();
+        buffer.unmap();
+        Ok(bytes)
+    }
+}
+
+fn storage(device: &wgpu::Device, label: &str, bytes: usize, copy_source: bool) -> wgpu::Buffer {
+    let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+    if copy_source {
+        usage |= wgpu::BufferUsages::COPY_SRC;
+    }
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: bytes as u64,
+        usage,
+        mapped_at_creation: false,
+    })
+}
+
+fn uniform<T: Pod>(device: &wgpu::Device, label: &str, value: &T) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::bytes_of(value),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    })
+}
+
+fn buffer_layout(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    read_only: bool,
+    uniform: bool,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: if uniform {
+                wgpu::BufferBindingType::Uniform
+            } else {
+                wgpu::BufferBindingType::Storage { read_only }
+            },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn bind_group(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+    buffers: &[&wgpu::Buffer],
+) -> wgpu::BindGroup {
+    let entries: Vec<_> = buffers
+        .iter()
+        .enumerate()
+        .map(|(index, buffer)| wgpu::BindGroupEntry {
+            binding: index as u32,
+            resource: buffer.as_entire_binding(),
+        })
+        .collect();
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &entries,
+    })
+}
+
+fn shader(device: &wgpu::Device, label: &str, source: &'static str) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    })
+}
+
+fn pipeline_layout(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::PipelineLayout {
+    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[layout],
+        push_constant_ranges: &[],
+    })
+}
+
+fn compute_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+    shader: &wgpu::ShaderModule,
+) -> wgpu::ComputePipeline {
+    let layout = pipeline_layout(device, label, layout);
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(&layout),
+        module: shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    })
+}
+
+fn render_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    vertex: &str,
+    fragment: &str,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(vertex),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fragment),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview: None,
+        cache: None,
+    })
+}
+
+fn output_texture(device: &wgpu::Device, dimensions: (u32, u32)) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Nodiform offscreen frame"),
+        size: wgpu::Extent3d {
+            width: dimensions.0,
+            height: dimensions.1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+fn linear_color(color: [f32; 4]) -> [f32; 4] {
+    fn linear(value: f32) -> f32 {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    [
+        linear(color[0]),
+        linear(color[1]),
+        linear(color[2]),
+        color[3],
+    ]
+}
+
+fn force_timestep(graph: &Graph) -> f32 {
+    // f64 accumulation keeps large weighted degrees finite and avoids losing
+    // small incident strengths while summing edges in their declared order.
+    let mut incident = vec![0.0_f64; graph.nodes.len()];
+    for edge in &graph.edges {
+        incident[edge.source] += f64::from(edge.strength);
+        incident[edge.target] += f64::from(edge.strength);
+    }
+    let maximum = incident.into_iter().fold(0.0_f64, f64::max);
+    if maximum == 0.0 {
+        1.0 / 120.0
+    } else {
+        (1.0_f64 / 120.0).min(0.5 / maximum) as f32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn timestep_bounds_incident_stiffness_and_zero_degree() {
+        use crate::model::{Edge, Graph, Node};
+        let mut graph = Graph::new(1);
+        assert_eq!(super::force_timestep(&graph), 1.0 / 120.0);
+        graph.nodes = (0..3)
+            .map(|index| Node {
+                id: index.to_string(),
+                label: index.to_string(),
+                color: [1.0; 4],
+                radius: 1.0,
+                position: [index as f32, 0.0],
+            })
+            .collect();
+        assert_eq!(super::force_timestep(&graph), 1.0 / 120.0);
+        graph.edges = vec![
+            Edge {
+                id: "01".into(),
+                source: 0,
+                target: 1,
+                color: [1.0; 4],
+                strength: 1_000_000.0,
+            },
+            Edge {
+                id: "02".into(),
+                source: 0,
+                target: 2,
+                color: [1.0; 4],
+                strength: 1_000_000.0,
+            },
+        ];
+        assert_eq!(super::force_timestep(&graph), 0.25e-6);
+        graph.edges[1].strength = 0.0;
+        let dt = super::force_timestep(&graph);
+        assert_eq!(dt, 0.5e-6);
+        // Previously this one-dimensional pair swapped +/-1 every step.
+        let mut left = -1.0_f64;
+        for _ in 0..8 {
+            let separation = left * 2.0;
+            let force =
+                64.0 * separation / (separation * separation + 0.25) - 1_000_000.0 * separation;
+            left += f64::from(dt) * force;
+            assert!((-1.0..=0.0).contains(&left));
+        }
+        graph.edges[0].strength = 0.0;
+        assert_eq!(super::force_timestep(&graph), 1.0 / 120.0);
+    }
+
+    #[test]
+    fn wgsl_shaders_parse_and_validate() {
+        for (name, source) in [
+            ("physics", include_str!("shaders/physics.wgsl")),
+            ("bounds", include_str!("shaders/bounds.wgsl")),
+            ("render", include_str!("shaders/render.wgsl")),
+        ] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        }
+    }
+
+    #[test]
+    fn gpu_struct_sizes_match_wgsl() {
+        assert_eq!(std::mem::size_of::<super::NodeStyle>(), 32);
+        assert_eq!(std::mem::size_of::<super::GpuEdge>(), 32);
+        assert_eq!(std::mem::size_of::<super::Neighbour>(), 16);
+        assert_eq!(std::mem::size_of::<super::PhysicsParameters>(), 32);
+        assert_eq!(std::mem::size_of::<super::FrameParameters>(), 16);
+    }
+
+    /// Opt-in actual backend validation, also usable with Mesa lavapipe in CI:
+    /// cargo test gpu::tests::headless_gpu_smoke -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires a Vulkan device or software Vulkan driver"]
+    fn headless_gpu_smoke() {
+        use super::*;
+        use crate::model::{EdgeSpec, Event, NodeSpec};
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        }))
+        .expect("No Vulkan adapter is available for the opt-in GPU test");
+        eprintln!("GPU validation adapter: {:?}", adapter.get_info());
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("Nodiform validation device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: Default::default(),
+            },
+            None,
+        ))
+        .expect("Vulkan device creation failed");
+        let mut gpu = GpuGraph::new(Arc::new(device), Arc::new(queue));
+        let mut graph = Graph::new(42);
+        let node = |id: &str, position: [f32; 2]| NodeSpec {
+            id: id.into(),
+            label: None,
+            color: "#89b4fa".into(),
+            radius: 1.0,
+            position: Some(position),
+        };
+        graph
+            .apply(&Event::Batch {
+                nodes: vec![node("a", [-3.0, 0.0]), node("b", [3.0, 0.0])],
+                edges: vec![EdgeSpec {
+                    id: "ab".into(),
+                    source: "a".into(),
+                    target: "b".into(),
+                    color: "#60708b".into(),
+                    strength: 1.0,
+                }],
+            })
+            .unwrap();
+        gpu.sync_graph(&graph, true);
+        gpu.step(1);
+        let positions = gpu.read_positions(2).unwrap();
+        let expected = -3.0 + ((64.0 * -6.0 / 36.25) + 6.0) / 120.0;
+        assert!((positions[0][0] - expected).abs() < 0.00001);
+        assert!((positions[0][0] + positions[1][0]).abs() < 0.00001);
+
+        // A style/strength update must never put simulated nodes back at birth.
+        graph
+            .apply(&Event::SetNode {
+                id: "a".into(),
+                color: Some("#ff0000".into()),
+                radius: Some(2.0),
+            })
+            .unwrap();
+        graph
+            .apply(&Event::SetEdge {
+                id: "ab".into(),
+                color: None,
+                strength: Some(2.0),
+            })
+            .unwrap();
+        gpu.sync_graph(&graph, false);
+        assert_eq!(positions, gpu.read_positions(2).unwrap());
+
+        // Append after an odd step exercises the opposite ping-pong buffer.
+        graph
+            .apply(&Event::Batch {
+                nodes: vec![node("c", [0.0, 9.0])],
+                edges: vec![],
+            })
+            .unwrap();
+        gpu.sync_graph(&graph, false);
+        assert_eq!(positions, gpu.read_positions(2).unwrap());
+        assert_eq!(gpu.read_positions(3).unwrap()[2], [0.0, 9.0]);
+        gpu.step(7);
+        assert!(gpu
+            .read_positions(3)
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|v| v.is_finite()));
+
+        // Non-aligned image widths exercise padded GPU readback rows.
+        gpu.render(137, 91);
+        let frame = gpu.read_rgba().unwrap();
+        assert_eq!(frame.len(), 137 * 91 * 4);
+        assert!(frame.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+        assert!(frame
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[0] > 100 || pixel[2] > 100));
+
+        let camera_before = read_camera(&gpu);
+        graph
+            .apply(&Event::Batch {
+                nodes: vec![node("distant", [1000.0, -900.0])],
+                edges: vec![],
+            })
+            .unwrap();
+        gpu.sync_graph(&graph, false);
+        gpu.render(137, 91);
+        let camera_after = read_camera(&gpu);
+        assert!(camera_after[3] > camera_before[3]);
+        for (position, node) in gpu.read_positions(4).unwrap().iter().zip(&graph.nodes) {
+            assert!((position[0] - camera_after[0]).abs() + node.radius <= camera_after[2]);
+            assert!((position[1] - camera_after[1]).abs() + node.radius <= camera_after[3]);
+        }
+
+        gpu.sync_graph(&graph, true);
+        assert_eq!(
+            gpu.read_positions(3).unwrap(),
+            vec![[-3.0, 0.0], [3.0, 0.0], [0.0, 9.0]]
+        );
+
+        // Regression: very stiff springs must not alternate endpoint positions.
+        let mut stiff = Graph::new(42);
+        stiff
+            .apply(&Event::Batch {
+                nodes: vec![node("left", [-1.0, 0.0]), node("right", [1.0, 0.0])],
+                edges: vec![EdgeSpec {
+                    id: "stiff".into(),
+                    source: "left".into(),
+                    target: "right".into(),
+                    color: "#60708b".into(),
+                    strength: 1_000_000.0,
+                }],
+            })
+            .unwrap();
+        gpu.sync_graph(&stiff, true);
+        assert_eq!(gpu.effective_timestep(), 0.5e-6);
+        for _ in 0..16 {
+            gpu.step(1);
+            let positions = gpu.read_positions(2).unwrap();
+            assert!(positions[0][0] <= 1e-7 && positions[1][0] >= -1e-7);
+            assert!(positions.iter().flatten().all(|value| value.is_finite()));
+        }
+    }
+
+    fn read_camera(gpu: &super::GpuGraph) -> [f32; 4] {
+        use eframe::wgpu;
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test camera readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("test camera transfer"),
+            });
+        encoder.copy_buffer_to_buffer(&gpu.camera, 0, &buffer, 0, 16);
+        gpu.queue.submit(Some(encoder.finish()));
+        let bytes = gpu.map_readback(&buffer).unwrap();
+        std::array::from_fn(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+    }
+}

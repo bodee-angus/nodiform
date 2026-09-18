@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Nodiform
+Comment=A laboratory for emergent graphs
+Exec=nodiform
+Icon=applications-science
+Terminal=false
+Categories=Education;Science;
+StartupNotify=true

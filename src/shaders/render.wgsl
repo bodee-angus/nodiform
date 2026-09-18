@@ -1,0 +1,88 @@
+struct Style {
+    color: vec4<f32>,
+    radius: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+struct Edge {
+    source: u32,
+    target_index: u32,
+    strength: f32,
+    _pad0: f32,
+    color: vec4<f32>,
+}
+struct Camera { center: vec2<f32>, half_extent: vec2<f32> }
+struct Frame { width: f32, height: f32, count: u32, edges: u32 }
+@group(0) @binding(0) var<storage, read> positions: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read> styles: array<Style>;
+@group(0) @binding(2) var<storage, read> edges: array<Edge>;
+@group(0) @binding(3) var<storage, read> camera: Camera;
+@group(0) @binding(4) var<uniform> frame: Frame;
+
+fn corner(index: u32) -> vec2<f32> {
+    let corners = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0)
+    );
+    return corners[index];
+}
+fn clip(world: vec2<f32>) -> vec4<f32> {
+    let p = (world - camera.center) / camera.half_extent;
+    return vec4<f32>(p.x, -p.y, 0.0, 1.0);
+}
+struct Vertex {
+    @builtin(position) position: vec4<f32>,
+    @location(0) local_pixels: vec2<f32>,
+    @location(1) @interpolate(flat) half_pixels: vec2<f32>,
+    @location(2) @interpolate(flat) color: vec4<f32>,
+}
+
+@vertex
+fn node_vertex(@builtin(vertex_index) vertex: u32,
+               @builtin(instance_index) index: u32) -> Vertex {
+    let q = corner(vertex);
+    let world_per_pixel = (camera.half_extent.y * 2.0) / frame.height;
+    let radius_pixels = styles[index].radius / world_per_pixel;
+    let local = q * (radius_pixels + 1.0);
+    var output: Vertex;
+    output.position = clip(positions[index] + local * world_per_pixel);
+    output.local_pixels = local;
+    output.half_pixels = vec2<f32>(radius_pixels);
+    output.color = styles[index].color;
+    return output;
+}
+@fragment
+fn node_fragment(input: Vertex) -> @location(0) vec4<f32> {
+    let coverage = clamp(input.half_pixels.x + 0.5 - length(input.local_pixels), 0.0, 1.0);
+    return vec4<f32>(input.color.rgb, input.color.a * coverage);
+}
+
+@vertex
+fn edge_vertex(@builtin(vertex_index) vertex: u32,
+               @builtin(instance_index) index: u32) -> Vertex {
+    let edge = edges[index];
+    let a = positions[edge.source];
+    let b = positions[edge.target_index];
+    let delta = b - a;
+    let distance = length(delta);
+    var direction = vec2<f32>(1.0, 0.0);
+    if distance > 0.000001 { direction = delta / distance; }
+    let normal = vec2<f32>(-direction.y, direction.x);
+    let world_per_pixel = (camera.half_extent.y * 2.0) / frame.height;
+    // Edges also have world-space width; no screen-space minimum thickness.
+    let half_pixels = vec2<f32>(distance * 0.5, 0.09) / world_per_pixel;
+    let local = corner(vertex) * (half_pixels + vec2<f32>(1.0));
+    let world = (a + b) * 0.5 + world_per_pixel * (direction * local.x + normal * local.y);
+    var output: Vertex;
+    output.position = clip(world);
+    output.local_pixels = local;
+    output.half_pixels = half_pixels;
+    output.color = edge.color;
+    return output;
+}
+@fragment
+fn edge_fragment(input: Vertex) -> @location(0) vec4<f32> {
+    let coverage = clamp(input.half_pixels + vec2<f32>(0.5) - abs(input.local_pixels), vec2<f32>(0.0), vec2<f32>(1.0));
+    return vec4<f32>(input.color.rgb, input.color.a * coverage.x * coverage.y);
+}

@@ -1,0 +1,7 @@
+/target/
+/recordings/
+/dist/
+*.nodiform.json
+*.mkv
+*.mp4
+

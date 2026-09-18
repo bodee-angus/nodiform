@@ -2,26 +2,211 @@
 //! The process boundary is for fault containment; it is not an OS security sandbox.
 pub use crate::model::Plan;
 use crate::model::{Event, Graph};
-use rquickjs::{Context, Runtime};
+use rquickjs::{Context, Ctx, Exception, Function, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{Read, Write};
+use std::cell::{Cell, RefCell};
+use std::io::{BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const RULE_API_VERSION: &str = "nodiform-rules-v3";
-pub const MAX_EVENTS: usize = 100_000;
+pub const RULE_API_VERSION: &str = "nodiform-rules-v4";
 const MAX_SOURCE_BYTES: usize = 1_048_576;
 const MAX_PARAMETER_BYTES: usize = 262_144;
 const MAX_REQUEST_BYTES: usize = 2_097_152;
-const MAX_EVENT_JSON_BYTES: usize = 16_777_216;
-const MAX_RESPONSE_BYTES: usize = 67_108_864;
-const WORKER_TIMEOUT: Duration = Duration::from_secs(15);
+const NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Budgets scale with memory available when compilation begins. One quarter is
+/// allowed for the JS heap and one quarter for events plus their validation graph.
+/// The remaining half leaves room for IPC, the UI, solver state and the OS.
+#[derive(Clone, Copy)]
+struct MemoryBudget {
+    heap: usize,
+    plan: usize,
+}
+
+impl MemoryBudget {
+    fn detect() -> Result<Self, String> {
+        let meminfo = std::fs::read_to_string("/proc/meminfo")
+            .map_err(|error| format!("Cannot determine available rule memory: {error}"))?;
+        let mut available = meminfo
+            .lines()
+            .find_map(|line| {
+                let value = line.strip_prefix("MemAvailable:")?;
+                value
+                    .split_whitespace()
+                    .next()?
+                    .parse::<usize>()
+                    .ok()?
+                    .checked_mul(1024)
+            })
+            .ok_or_else(|| "Cannot determine available rule memory".to_string())?;
+        // Honour cgroup v2 limits as well as host RAM, including ancestor limits.
+        if let Ok(groups) = std::fs::read_to_string("/proc/self/cgroup") {
+            if let Some(group) = groups.lines().find_map(|line| line.strip_prefix("0::")) {
+                let root = std::path::Path::new("/sys/fs/cgroup");
+                let mut directory = root.join(group.trim_start_matches('/'));
+                loop {
+                    let maximum = std::fs::read_to_string(directory.join("memory.max"))
+                        .ok()
+                        .and_then(|value| value.trim().parse::<usize>().ok());
+                    let current = std::fs::read_to_string(directory.join("memory.current"))
+                        .ok()
+                        .and_then(|value| value.trim().parse::<usize>().ok());
+                    if let (Some(maximum), Some(current)) = (maximum, current) {
+                        available = available.min(maximum.saturating_sub(current));
+                    }
+                    if directory == root || !directory.pop() {
+                        break;
+                    }
+                }
+            }
+        }
+        if available == 0 {
+            return Err("No available memory remains for rule compilation".into());
+        }
+        Ok(Self {
+            heap: available / 4,
+            plan: available / 4,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct Progress {
+    last: Rc<Cell<Instant>>,
+    reported: Rc<Cell<Instant>>,
+    report: Rc<RefCell<Box<dyn FnMut()>>>,
+}
+
+impl Progress {
+    fn new(report: impl FnMut() + 'static) -> Self {
+        Self {
+            last: Rc::new(Cell::new(Instant::now())),
+            reported: Rc::new(Cell::new(Instant::now())),
+            report: Rc::new(RefCell::new(Box::new(report))),
+        }
+    }
+
+    fn tick(&self) {
+        let now = Instant::now();
+        self.last.set(now);
+        if now.duration_since(self.reported.get()) >= Duration::from_millis(250) {
+            (self.report.borrow_mut())();
+            self.reported.set(now);
+        }
+    }
+}
+
+struct Compilation {
+    events: Vec<Event>,
+    graph: Graph,
+    total_ticks: u64,
+    estimated_bytes: usize,
+    budget: usize,
+    failure: Option<String>,
+}
+
+impl Compilation {
+    fn emit(&mut self, json: &str, progress: &Progress) -> Result<(), String> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if json.len() > self.budget.saturating_sub(self.estimated_bytes) {
+            return Err(self.memory_error());
+        }
+        let event: Event = serde_json::from_str(json)
+            .map_err(|error| format!("Invalid generated event: {error}"))?;
+        // Account for the owned event, vector slack, duplicated validation graph
+        // and its ID indexes. This is a conservative estimate, not a node quota.
+        let owned = match &event {
+            Event::Batch { nodes, edges } => {
+                let node_bytes = nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, node)| {
+                        if index & 1023 == 0 {
+                            progress.tick();
+                        }
+                        (2 * std::mem::size_of_val(node)
+                            + std::mem::size_of::<crate::model::Node>()
+                            + 128)
+                            .saturating_add(node.id.len().saturating_mul(4))
+                            .saturating_add(node.label.as_ref().map_or(node.id.len(), String::len))
+                            .saturating_add(node.color.len())
+                    })
+                    .fold(0usize, usize::saturating_add);
+                let edge_bytes = edges
+                    .iter()
+                    .enumerate()
+                    .map(|(index, edge)| {
+                        if index & 1023 == 0 {
+                            progress.tick();
+                        }
+                        (2 * std::mem::size_of_val(edge)
+                            + std::mem::size_of::<crate::model::Edge>()
+                            + 128)
+                            .saturating_add(edge.id.len().saturating_mul(3))
+                            .saturating_add(edge.source.len())
+                            .saturating_add(edge.target.len())
+                            .saturating_add(edge.color.len())
+                    })
+                    .fold(0usize, usize::saturating_add);
+                node_bytes.saturating_add(edge_bytes)
+            }
+            Event::SetNode { id, color, .. } | Event::SetEdge { id, color, .. } => id
+                .len()
+                .saturating_add(color.as_ref().map_or(0, String::len)),
+            Event::Wait { .. } => 0,
+        };
+        let estimated = self
+            .estimated_bytes
+            .checked_add(2 * std::mem::size_of::<Event>())
+            .and_then(|value| value.checked_add(owned))
+            .ok_or_else(|| self.memory_error())?;
+        if estimated > self.budget {
+            return Err(self.memory_error());
+        }
+        self.events
+            .try_reserve(1)
+            .map_err(|error| format!("Cannot allocate generated events: {error}"))?;
+        self.graph
+            .apply_with_progress(&event, || progress.tick())
+            .map_err(|error| format!("Event {}: {error}", self.events.len() + 1))?;
+        if let Event::Wait { ticks } = &event {
+            self.total_ticks = self
+                .total_ticks
+                .checked_add(u64::from(*ticks))
+                .ok_or_else(|| "Total simulation duration overflowed".to_string())?;
+        }
+        self.events.push(event);
+        self.estimated_bytes = estimated;
+        Ok(())
+    }
+
+    fn memory_error(&self) -> String {
+        format!("Generated plan needs more memory than is currently available for compilation ({} MiB reserved from available RAM)", self.budget / 1024 / 1024)
+    }
+}
 
 /// Compile JavaScript defining build(graph, p) or the legacy function* generate(N, params).
 /// No filesystem, network, process, clock, unseeded randomness, or module loader is exposed.
+#[cfg(test)]
 pub fn compile_source(source: &str, parameters: Value, seed: u32) -> Result<Plan, String> {
+    compile_with_budget(source, parameters, seed, MemoryBudget::detect()?, || {})
+}
+
+fn compile_with_budget(
+    source: &str,
+    parameters: Value,
+    seed: u32,
+    budget: MemoryBudget,
+    report: impl FnMut() + 'static,
+) -> Result<Plan, String> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err("Rule source exceeds 1 MiB".into());
     }
@@ -33,22 +218,44 @@ pub fn compile_source(source: &str, parameters: Value, seed: u32) -> Result<Plan
     }
     let runtime =
         Runtime::new().map_err(|error| format!("Cannot initialise rule runtime: {error}"))?;
-    // rquickjs uses QuickJS's default allocator. Custom allocator features would disable this limit.
-    runtime.set_memory_limit(64 * 1024 * 1024);
+    runtime.set_memory_limit(budget.heap);
     runtime.set_max_stack_size(512 * 1024);
-    let started = Instant::now();
-    let mut interrupt_checks = 0u32;
+    let progress = Progress::new(report);
+    let last_progress = progress.last.clone();
     runtime.set_interrupt_handler(Some(Box::new(move || {
-        interrupt_checks += 1;
-        interrupt_checks > 10_000 || started.elapsed() > Duration::from_secs(5)
+        last_progress.get().elapsed() > NO_PROGRESS_TIMEOUT
     })));
+    let compilation = Rc::new(RefCell::new(Compilation {
+        events: Vec::new(),
+        graph: Graph::new(seed),
+        total_ticks: 0,
+        estimated_bytes: 0,
+        budget: budget.plan,
+        failure: None,
+    }));
     let context =
         Context::full(&runtime).map_err(|error| format!("Cannot create rule context: {error}"))?;
-    let json = context.with(|ctx| -> Result<String, String> {
+    context.with(|ctx| -> Result<(), String> {
+        let state = compilation.clone();
+        let emit_progress = progress.clone();
+        let emit = Function::new(ctx.clone(), move |ctx: Ctx<'_>, json: String| {
+            emit_progress.tick();
+            let mut state = state.borrow_mut();
+            let result = state.emit(&json, &emit_progress);
+            emit_progress.tick();
+            result.map_err(|error| {
+                state.failure = Some(error.clone());
+                Exception::throw_message(&ctx, &error)
+            })
+        }).map_err(|error| error.to_string())?;
+        let checkpoint = Function::new(ctx.clone(), move || progress.tick())
+            .map_err(|error| error.to_string())?;
+        ctx.globals().set("__nodiform_emit", emit).map_err(|e| e.to_string())?;
+        ctx.globals().set("__nodiform_checkpoint", checkpoint).map_err(|e| e.to_string())?;
         ctx.globals().set("__nodiform_source", source).map_err(|e| e.to_string())?;
         ctx.globals().set("__nodiform_params", parameters_json).map_err(|e| e.to_string())?;
         ctx.globals().set("__nodiform_seed", seed).map_err(|e| e.to_string())?;
-        ctx.eval::<String, _>(RUNNER).map_err(|error| {
+        ctx.eval::<(), _>(RUNNER).map_err(|error| {
             if error.is_exception() {
                 let exception = ctx.catch();
                 let detail = exception.as_object().and_then(|object| {
@@ -57,36 +264,19 @@ pub fn compile_source(source: &str, parameters: Value, seed: u32) -> Result<Plan
                     Some(if stack.is_empty() { message } else { format!("{message}\n{stack}") })
                 }).unwrap_or_else(|| format!("{exception:?}"));
                 let detail: String = detail.chars().take(4_096).collect();
-                format!("Rule error: {detail}. Execution is limited to 64 MiB, a 512 KiB stack, and an instruction/time budget.")
+                format!("Rule error: {detail}. Available-memory budget: {} MiB JS heap; 512 KiB stack; generation must make progress at least every 5 seconds.", budget.heap / 1024 / 1024)
             } else { format!("Rule runtime error: {error}") }
         })
     })?;
-    // JavaScript counts UTF-16 code units; enforce the actual UTF-8 byte cap here too.
-    if json.len() > MAX_EVENT_JSON_BYTES {
-        return Err("Generated event JSON exceeds 16 MiB".into());
-    }
-    let events: Vec<Event> =
-        serde_json::from_str(&json).map_err(|error| format!("Invalid generated event: {error}"))?;
-    if events.len() > MAX_EVENTS {
-        return Err(format!("At most {MAX_EVENTS} events are allowed"));
-    }
-    let mut graph = Graph::new(seed);
-    let mut total_ticks = 0u64;
-    for (index, event) in events.iter().enumerate() {
-        graph
-            .apply(event)
-            .map_err(|error| format!("Event {}: {error}", index + 1))?;
-        if let Event::Wait { ticks } = event {
-            total_ticks = total_ticks
-                .checked_add(u64::from(*ticks))
-                .ok_or_else(|| "Total simulation duration overflowed".to_string())?;
-        }
+    let mut state = compilation.borrow_mut();
+    if let Some(error) = state.failure.take() {
+        return Err(error);
     }
     Ok(Plan {
-        events,
-        total_ticks,
-        node_count: graph.nodes.len(),
-        edge_count: graph.edges.len(),
+        events: std::mem::take(&mut state.events),
+        total_ticks: state.total_ticks,
+        node_count: state.graph.nodes.len(),
+        edge_count: state.graph.edges.len(),
     })
 }
 
@@ -102,10 +292,18 @@ const RUNNER: &str = concat!(
     delete globalThis.__nodiform_source;
     delete globalThis.__nodiform_params;
     delete globalThis.__nodiform_seed;
+    const emitHost = globalThis.__nodiform_emit;
+    const checkpointHost = globalThis.__nodiform_checkpoint;
+    let operations = 0;
+    function checkpoint() {
+        operations += 1;
+        if ((operations & 127) === 0) checkpointHost();
+    }
+    delete globalThis.__nodiform_emit;
+    delete globalThis.__nodiform_checkpoint;
     const stringify = JSON.stringify;
     const parse = JSON.parse;
     const finite = Number.isFinite;
-    const join = Function.prototype.call.bind(Array.prototype.join);
     const push = Function.prototype.call.bind(Array.prototype.push);
     const filter = Function.prototype.call.bind(Array.prototype.filter);
     const arrayFrom = Function.prototype.call.bind(Array.from, Array);
@@ -155,10 +353,7 @@ const RUNNER: &str = concat!(
             return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
         }
     });
-    const encoded = [];
-    let bytes = 2;
     function emit(value) {
-        if (encoded.length >= 100000) throw new ErrorType('At most 100000 events are allowed');
         const event = stringify(value, (_key, value) => {
             if (typeof value === 'number' && !finite(value)) {
                 throw new ErrorType('Events cannot contain NaN or Infinity');
@@ -166,9 +361,7 @@ const RUNNER: &str = concat!(
             return value;
         });
         if (event === undefined) throw new ErrorType('Every yield must contain an event');
-        bytes += event.length + 1;
-        if (bytes > 16777216) throw new ErrorType('Generated event JSON exceeds 16 MiB');
-        push(encoded, event);
+        emitHost(event);
     }
     function id(value) {
         if (typeof value === 'string') return value;
@@ -177,8 +370,6 @@ const RUNNER: &str = concat!(
     }
     let nodes = [], edges = [];
     const known = new Set();
-    let knownCount = 0;
-    let edgeCount = 0;
     function flush() {
         if (nodes.length || edges.length) {
             emit(N.batch(nodes, edges));
@@ -190,10 +381,9 @@ const RUNNER: &str = concat!(
         add(value, options = {}) {
             const key = id(value);
             if (setHas(known, key)) throw new ErrorType(`Duplicate node ID '${key}'`);
-            if (knownCount >= 8192) throw new ErrorType('At most 8192 nodes are allowed');
             push(nodes, stringifyCopy(N.node(key, options)));
             setAdd(known, key);
-            knownCount += 1;
+            checkpoint();
             return key;
         },
         ids() { return arrayFrom(known); },
@@ -207,9 +397,6 @@ const RUNNER: &str = concat!(
             if (options.id !== undefined && values.length > 1) {
                 throw new ErrorType('A custom edge ID can connect only one target');
             }
-            if (values.length > 250000 - edgeCount) {
-                throw new ErrorType('At most 250000 edges are allowed');
-            }
             const snapshot = stringifyCopy(options);
             const targetIds = [];
             for (let index = 0; index < values.length; index += 1) {
@@ -221,7 +408,7 @@ const RUNNER: &str = concat!(
                 edge.id = id(edge.id);
                 push(edges, edge);
                 push(added, edge.id);
-                edgeCount += 1;
+                checkpoint();
             }
             return added;
         },
@@ -258,7 +445,7 @@ const RUNNER: &str = concat!(
             emit(step.value);
         }
     }
-    return '[' + join(encoded, ',') + ']';
+    return undefined;
 })()
 "#
 );
@@ -274,7 +461,7 @@ struct WorkerRequest {
 pub struct RuleJob {
     child: Option<Child>,
     result: Receiver<Result<Plan, String>>,
-    started: Instant,
+    activity: Arc<Mutex<Instant>>,
     finished: bool,
 }
 
@@ -292,6 +479,7 @@ impl RuleJob {
         if request.len() > MAX_REQUEST_BYTES {
             return Err("Rule request exceeds 2 MiB".into());
         }
+        let budget = MemoryBudget::detect()?.plan;
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut child = Command::new(executable)
             .arg("--rule-worker")
@@ -317,30 +505,20 @@ impl RuleJob {
                 let _ = write_sender.send(Err(format!("Cannot send rules to worker: {error}")));
             }
         });
+        let activity = Arc::new(Mutex::new(Instant::now()));
+        let reader_activity = activity.clone();
         std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let read = stdout
-                .take((MAX_RESPONSE_BYTES + 1) as u64)
-                .read_to_end(&mut bytes);
-            let value = match read {
-                Err(error) => Err(format!("Cannot read rule worker response: {error}")),
-                Ok(_) if bytes.len() > MAX_RESPONSE_BYTES => {
-                    Err("Rule worker response exceeds 64 MiB".into())
-                }
-                Ok(_) => {
-                    serde_json::from_slice::<Result<Plan, String>>(&bytes).unwrap_or_else(|error| {
-                        Err(format!(
-                            "Rule worker stopped without a valid response: {error}"
-                        ))
-                    })
-                }
+            let reader = ActivityReader {
+                inner: stdout,
+                remaining: budget,
+                activity: reader_activity,
             };
-            let _ = sender.send(value);
+            let _ = sender.send(read_worker_response(reader));
         });
         Ok(Self {
             child: Some(child),
             result,
-            started: Instant::now(),
+            activity,
             finished: false,
         })
     }
@@ -358,10 +536,12 @@ impl RuleJob {
                 self.finish();
                 Some(Err("Rule worker disconnected".into()))
             }
-            Err(TryRecvError::Empty) if self.started.elapsed() > WORKER_TIMEOUT => {
+            Err(TryRecvError::Empty)
+                if self.activity.lock().unwrap().elapsed() > WORKER_TIMEOUT =>
+            {
                 self.finish();
                 Some(Err(
-                    "Rule worker exceeded the 15-second watchdog limit".into()
+                    "Rule worker stopped reporting progress for 60 seconds".into()
                 ))
             }
             Err(TryRecvError::Empty) => None,
@@ -387,6 +567,53 @@ impl Drop for RuleJob {
     }
 }
 
+/// Reader guard scales with the same available-memory budget as compilation;
+/// incoming data is parsed directly, without collecting a second whole JSON plan.
+struct ActivityReader<R> {
+    inner: R,
+    remaining: usize,
+    activity: Arc<Mutex<Instant>>,
+}
+
+impl<R: Read> Read for ActivityReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let size = buffer.len().min(self.remaining.saturating_add(1));
+        let count = self.inner.read(&mut buffer[..size])?;
+        if count > self.remaining {
+            return Err(std::io::Error::other(
+                "Rule worker response exceeds available-memory budget",
+            ));
+        }
+        self.remaining -= count;
+        if count != 0 {
+            *self.activity.lock().unwrap() = Instant::now();
+        }
+        Ok(count)
+    }
+}
+
+fn read_worker_response(reader: impl Read) -> Result<Plan, String> {
+    let mut reader = BufReader::new(reader);
+    loop {
+        let mut marker = [0u8; 2];
+        reader
+            .read_exact(&mut marker)
+            .map_err(|error| format!("Cannot read rule worker response: {error}"))?;
+        match &marker {
+            b"P\n" => continue,
+            b"R\n" => {
+                return serde_json::from_reader::<_, Result<Plan, String>>(&mut reader)
+                    .unwrap_or_else(|error| {
+                        Err(format!(
+                            "Rule worker stopped without a valid response: {error}"
+                        ))
+                    })
+            }
+            _ => return Err("Invalid rule worker progress message".into()),
+        }
+    }
+}
+
 /// Called before GUI initialisation when argv includes --rule-worker.
 pub fn worker_main() -> i32 {
     let result = (|| -> Result<Plan, String> {
@@ -400,10 +627,22 @@ pub fn worker_main() -> i32 {
         }
         let request: WorkerRequest = serde_json::from_slice(&request)
             .map_err(|error| format!("Invalid rule request: {error}"))?;
-        compile_source(&request.source, request.parameters, request.seed)
+        compile_with_budget(
+            &request.source,
+            request.parameters,
+            request.seed,
+            MemoryBudget::detect()?,
+            || {
+                let mut output = std::io::stdout().lock();
+                let _ = output.write_all(b"P\n").and_then(|_| output.flush());
+            },
+        )
     })();
     let status = i32::from(result.is_err());
     let mut output = std::io::stdout().lock();
+    if output.write_all(b"R\n").is_err() {
+        return 2;
+    }
     match serde_json::to_writer(&mut output, &result)
         .and_then(|_| output.flush().map_err(serde_json::Error::io))
     {
@@ -433,10 +672,10 @@ mod tests {
     }
 
     #[test]
-    fn palettes_return_unique_hex_colours_up_to_the_node_limit() {
+    fn palettes_extend_beyond_the_former_node_limit() {
         assert!(palette_colours(0).is_empty());
-        let colours = palette_colours(crate::model::MAX_NODES);
-        assert_eq!(colours.len(), crate::model::MAX_NODES);
+        let colours = palette_colours(8_193);
+        assert_eq!(colours.len(), 8_193);
         assert!(colours.iter().all(|colour| {
             colour.len() == 7
                 && colour.starts_with('#')
@@ -476,7 +715,7 @@ mod tests {
     fn palette_rejects_invalid_counts_without_coercion() {
         for count in [
             "-1",
-            "8193",
+            "9007199254740992",
             "1.5",
             "NaN",
             "Infinity",
@@ -488,7 +727,7 @@ mod tests {
             let source = format!("function build(graph) {{ graph.palette({count}); }}");
             assert!(compile_source(&source, json!({}), 1)
                 .unwrap_err()
-                .contains("palette(count) requires an integer from 0 to 8192"));
+                .contains("palette(count) requires a nonnegative safe integer"));
         }
     }
 
@@ -559,9 +798,9 @@ mod tests {
             }
             assert_eq!(birth[1], Event::Wait { ticks: 6 });
         }
-        // The worker result is larger than the compact JS event stream because serde
-        // materialises defaults. It must still fit the independently enforced IPC cap.
-        assert!(serde_json::to_vec(&plan).unwrap().len() < MAX_RESPONSE_BYTES);
+        // Worker serde round-trips preserve the materialised defaults.
+        let bytes = serde_json::to_vec(&plan).unwrap();
+        assert_eq!(plan, serde_json::from_slice::<Plan>(&bytes).unwrap());
     }
 
     #[test]
@@ -937,15 +1176,100 @@ mod tests {
 
     #[test]
     fn runtime_rejects_heap_and_stack_exhaustion() {
-        assert!(compile_source(
-            "function* generate() { yield new ArrayBuffer(1024 * 1024 * 1024); }",
+        let budget = MemoryBudget {
+            heap: 4 * 1024 * 1024,
+            plan: 4 * 1024 * 1024,
+        };
+        assert!(compile_with_budget(
+            "function* generate() { yield new ArrayBuffer(16 * 1024 * 1024); }",
             json!({}),
-            0
+            0,
+            budget,
+            || {},
         )
         .is_err());
-        assert!(
-            compile_source("function* generate() { yield* generate(); }", json!({}), 0).is_err()
+        assert!(compile_with_budget(
+            "function* generate() { yield* generate(); }",
+            json!({}),
+            0,
+            budget,
+            || {},
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn streamed_events_pass_former_count_and_json_limits() {
+        let plan = compile_source(
+            r#"function* generate(N) {
+            for (let i = 0; i < 17000; i++) {
+                yield N.batch([N.node(String(i), {label: 'x'.repeat(1024)})]);
+            }
+            for (let i = 0; i < 100001; i++) yield N.wait(1);
+        }"#,
+            json!({}),
+            0,
+        )
+        .unwrap();
+        assert_eq!(plan.node_count, 17_000);
+        assert_eq!(plan.events.len(), 117_001);
+        assert_eq!(plan.total_ticks, 100_001);
+        assert!(serde_json::to_vec(&plan).unwrap().len() > 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn generated_plan_respects_resource_budget_without_count_quota() {
+        let result = compile_with_budget(
+            "function* generate(N) { for(let i=0; i<100; i++) yield N.batch([N.node(String(i))]); }",
+            json!({}), 0, MemoryBudget { heap: 4 * 1024 * 1024, plan: 4096 }, || {},
         );
+        assert!(result
+            .unwrap_err()
+            .contains("more memory than is currently available"));
+    }
+
+    #[test]
+    fn checkpoints_refresh_progress_and_native_callbacks_are_private() {
+        let progress = Progress::new(|| {});
+        progress.last.set(Instant::now() - Duration::from_secs(30));
+        assert!(progress.last.get().elapsed() > NO_PROGRESS_TIMEOUT);
+        progress.tick();
+        assert!(progress.last.get().elapsed() < NO_PROGRESS_TIMEOUT);
+        let plan = compile_source(r#"function build(graph) {
+            if (typeof globalThis.__nodiform_emit !== 'undefined' ||
+                typeof globalThis.__nodiform_checkpoint !== 'undefined') throw new Error('host leak');
+            for(let i=0; i<10000; i++) graph.add(i);
+        }"#, json!({}), 0).unwrap();
+        assert_eq!(plan.node_count, 10_000);
+    }
+
+    #[test]
+    fn worker_progress_protocol_streams_result_and_guards_memory() {
+        let plan = Plan {
+            events: vec![Event::Wait { ticks: 3 }],
+            total_ticks: 3,
+            node_count: 0,
+            edge_count: 0,
+        };
+        let mut bytes = b"P\nP\nR\n".to_vec();
+        serde_json::to_writer(&mut bytes, &Ok::<_, String>(&plan)).unwrap();
+        let activity = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(90)));
+        let reader = ActivityReader {
+            inner: bytes.as_slice(),
+            remaining: bytes.len(),
+            activity: activity.clone(),
+        };
+        assert_eq!(read_worker_response(reader).unwrap(), plan);
+        assert!(activity.lock().unwrap().elapsed() < WORKER_TIMEOUT);
+        let reader = ActivityReader {
+            inner: bytes.as_slice(),
+            remaining: 4,
+            activity,
+        };
+        assert!(read_worker_response(reader)
+            .unwrap_err()
+            .contains("available-memory budget"));
+        assert!(read_worker_response(&b"P\nR\n{incomplete"[..]).is_err());
     }
 
     #[test]

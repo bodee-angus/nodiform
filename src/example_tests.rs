@@ -5,6 +5,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 const PERMUTATIONS: &str = include_str!("../examples/abc-permutations.js");
+const PREVIOUS_HALF: &str = include_str!("../examples/half-neighbourhood.js");
 
 fn permutation(alphabet: &str, repeat: bool, order: &str, seed: u32) -> Graph {
     let plan = compile_source(
@@ -96,15 +97,125 @@ fn alphabet_palette_does_not_repeat_the_old_five_colour_cycle() {
 }
 
 #[test]
-fn oversized_permutations_are_rejected_before_building_a_factorial_plan() {
-    let error = compile_source(
+fn permutations_can_exceed_the_previous_node_and_depth_limits() {
+    let plan = compile_source(
         PERMUTATIONS,
-        json!({"alphabet":"ABCDEFGHIJKL", "maxLength":10}),
+        json!({"alphabet":"AB", "maxLength":13, "repetitions":true, "ticksPerNode":0}),
         42,
     )
-    .unwrap_err();
-    assert!(error.contains("8192"), "{error}");
-    assert!(!error.contains("interrupted"), "{error}");
+    .unwrap();
+    assert_eq!(plan.node_count, 16_382);
+    assert_eq!(plan.edge_count, 32_736);
+    assert_eq!(plan.total_ticks, 0);
+}
+
+#[test]
+fn nonrepeating_permutations_stop_at_the_available_alphabet() {
+    // No empty layers are traversed above the available three letters.
+    for order in ["lexicographic", "reverse", "shuffle", "branch-walk"] {
+        let plan = compile_source(
+            PERMUTATIONS,
+            json!({"alphabet":"ABC", "maxLength":9_007_199_254_740_991_u64, "order":order}),
+            42,
+        )
+        .unwrap();
+        assert_eq!((plan.node_count, plan.edge_count), (15, 24));
+    }
+}
+
+#[test]
+fn shipped_count_inputs_accept_more_than_the_old_node_limit() {
+    for (source, edges) in [
+        (include_str!("../examples/ring.js"), 8_193),
+        (include_str!("../examples/modular-residues.js"), 32_756),
+    ] {
+        let plan = compile_source(source, json!({"count":8193, "ticksPerNode":0}), 42).unwrap();
+        assert_eq!((plan.node_count, plan.edge_count), (8_193, edges));
+    }
+}
+
+#[test]
+fn complete_growth_can_exceed_its_previous_example_limit() {
+    let plan = compile_source(
+        include_str!("../examples/complete-growth.js"),
+        json!({"count":710, "interval":0}),
+        42,
+    )
+    .unwrap();
+    assert_eq!((plan.node_count, plan.edge_count), (710, 251_695));
+}
+
+#[test]
+fn previous_half_example_matches_the_requested_first_six_births() {
+    let plan = compile_source(PREVIOUS_HALF, json!({"count":6, "interval":7}), 42).unwrap();
+    assert_eq!(
+        (plan.node_count, plan.edge_count, plan.total_ticks),
+        (6, 9, 42)
+    );
+    let expected: [&[&str]; 6] = [
+        &[],
+        &["1"],
+        &["2"],
+        &["3", "2"],
+        &["4", "3"],
+        &["5", "4", "3"],
+    ];
+    let (pairs, remainder) = plan.events.as_chunks::<2>();
+    let mut events = pairs.iter();
+    for (index, targets) in expected.iter().enumerate() {
+        let pair = events.next().unwrap();
+        let Event::Batch { nodes, edges } = &pair[0] else {
+            panic!("Each birth must start with its node and edges");
+        };
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, (index + 1).to_string());
+        assert!(edges.iter().all(|edge| edge.source == nodes[0].id));
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.target.as_str())
+                .collect::<Vec<_>>(),
+            *targets
+        );
+        assert!(matches!(pair[1], Event::Wait { ticks: 7 }));
+    }
+    assert!(events.next().is_none());
+    assert!(remainder.is_empty());
+}
+
+#[test]
+fn previous_half_default_has_only_unique_recent_predecessor_edges() {
+    let plan = compile_source(PREVIOUS_HALF, json!({}), 42).unwrap();
+    assert_eq!((plan.node_count, plan.edge_count), (500, 62_500));
+    assert_eq!(plan.total_ticks, 500 * 6);
+    let mut seen = BTreeSet::new();
+    let mut waits = 0;
+    let mut births = 0;
+    for event in &plan.events {
+        match event {
+            Event::Batch { nodes, edges } => {
+                births += 1;
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0].id, births.to_string());
+                assert_eq!(edges.len(), births / 2);
+                for edge in edges {
+                    let source: usize = edge.source.parse().unwrap();
+                    let target: usize = edge.target.parse().unwrap();
+                    assert_eq!(source, births);
+                    assert!(target < source && target >= source - source / 2);
+                    assert!(seen.insert((source, target)), "duplicate connection");
+                    assert!(edge.gradient);
+                    assert_eq!(edge.strength, crate::model::DEFAULT_EDGE_STRENGTH);
+                }
+            }
+            Event::Wait { ticks } => {
+                assert_eq!(*ticks, 6);
+                waits += 1;
+            }
+            _ => panic!("Example should emit only births and waits"),
+        }
+    }
+    assert_eq!((births, waits, seen.len()), (500, 500, 62_500));
 }
 
 #[test]

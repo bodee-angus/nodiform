@@ -2,11 +2,12 @@
 
 A native laboratory for emergent graphs. Write rules, choose the order in which a graph grows, and watch its structure develop in two dimensions.
 
-Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.4 adds births near connected neighbours, more fluid motion, and a sharp, monitor-scaled preview on a black background. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
+Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.5 removes the fixed node and edge caps and grows GPU storage with the graph. Available memory and the GPU’s actual buffer and indexing limits still determine what can run. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
 
 ## What this version does
 
 - Runs editable JavaScript rules that create nodes and edges in a precise sequence.
+- Grows graph storage as needed, without the former 8,192-node or 250,000-edge caps.
 - Builds optional input controls from each script, without assuming an alphabet, node count, or graph family.
 - Applies code-defined colours, world-space node radii, and edge strengths, including changes later in a run.
 - Generates vivid hex palettes in a perceptual colour space with `graph.palette(count)` or `N.palette(count)`.
@@ -18,7 +19,7 @@ Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. 
 - Offers **Preview** at the canvas’s physical pixel resolution and **Record** at an independent output resolution; recording streams fixed-timeline video to FFmpeg.
 - Optionally sizes nodes by connection count without changing the simulation's forces.
 
-The default experiment is a small eight-node chain with no required inputs. **Experiment → Examples** contains a graph in which each new node connects to every earlier node, letter permutations, a growing ring, and modular residues. The complete-growth example creates 500 nodes and 124,750 edges. These are editable experiments, not fixed application modes.
+The default experiment is a small eight-node chain with no required inputs. **Experiment → Examples** contains **Connect to every earlier node**, **Connect to the previous half**, letter permutations, a growing ring, and modular residues. Both numbered growth examples default to 500 nodes: connecting to every earlier node creates 124,750 edges, while connecting to the previous half creates 62,500. These are editable experiments, not fixed application modes.
 
 The native egui interface offers **Settings → Appearance → System / Light / Dark**, with matching editor colours and controls. The theme is remembered separately from experiments and does not change recorded graph colours. Rounded cards and blue accents surround a pure black simulation canvas.
 
@@ -87,11 +88,15 @@ The archive also includes an optional desktop-entry template. Its `Exec=nodiform
 
 ## Physics and recording limits
 
-The first solver evaluates every pair of nodes, so repulsion costs **O(N²)** per tick. This build limits graphs to **8,192 nodes and 250,000 edges**, with GPU buffers reserved for those capacities. Those are validation limits, not a promise of interactive frame rates. Dense graphs can be expensive well below them. The rule worker has a 64 MiB JavaScript heap limit and a 16 MiB generated event-JSON limit; a large experiment can hit either before reaching the graph caps.
+There is no application-selected node or edge count cap. GPU buffers grow as needed while preserving existing positions and momentum. The device’s storage-buffer, buffer-size and dispatch limits, shader index ranges, and available RAM and GPU memory still bound a run. The application checks hardware capacity before playback or recording and reports allocation failures.
+
+The solver still evaluates every pair of nodes, so repulsion costs **O(N²)** per tick: doubling the node count roughly quadruples the pair work. Removing count caps does not make larger graphs fast. Dense graphs also require quadratically many edges. Longer-than-real-time recording preserves the timeline, but cannot remove those computation and memory costs.
+
+Updated examples no longer impose the former graph count ceilings. **Saved or custom scripts retain their own guards**, including any `8192` check or input `max` already in their source. Load an updated example, or edit those guards yourself; updating the application does not rewrite your experiments.
 
 Forces consist of softened repulsion and weighted zero-rest-length attraction. There is no centring gravity. The camera follows the graph without applying a force to it. Disconnected attraction components can therefore drift apart indefinitely. Zero-strength edges do not hold components together.
 
-Version 0.1.4 reduces the repulsion coefficient from 1024 to 512, keeps the default edge strength at 4, and retains 85% of the preceding tick’s capped movement before adding the next force-driven increment. The earlier solver discarded all momentum each tick, which contributed to its sluggish feel. Preview timing also now carries fractional elapsed time instead of losing it at frame boundaries. Explicit edge strengths remain unchanged; saved experiments use the new `nodiform-force-v3` model when rerun.
+The `nodiform-force-v3` model introduced in 0.1.4 remains unchanged: repulsion is 512, default edge strength is 4, and each tick retains 85% of the preceding capped movement before adding the next force-driven increment. Preview timing carries fractional elapsed time between frame boundaries. Explicit edge strengths remain unchanged.
 
 Automatic births use the unweighted centre of connected nodes created earlier in the sequence, plus a small deterministic offset of less than or equal to one world unit per axis. With no such neighbours they start near `[0, 0]`. Connections created after a simulation wait do not reposition existing nodes. The seed fixes the offset, while birth order, waits, and the neighbours’ live positions also determine the resulting location. Supply `position: [x, y]` to choose an exact initial location.
 
@@ -99,7 +104,7 @@ The solver seeks relaxed configurations but does not promise a global minimum, m
 
 Recording streams frames into an MKV file with bounded buffering. It does not create a directory of PNG images. Simulation time is based on fixed ticks, not elapsed wall time: a slow encoder or GPU makes the run take longer instead of deliberately skipping recorded frames. Long recordings still need substantial disk space. MKV improves interruption tolerance, but a crash or full disk can still leave an incomplete or unusable file.
 
-This alpha does **not** yet provide Barnes–Hut repulsion, resumable simulation checkpoints, a packaged FFmpeg runtime, or a complete debugger. Rules produce a finite event plan before playback; they cannot inspect the evolving GPU positions or react to live solver state. The JavaScript runtime is constrained for resource safety, but it is not a security boundary for running untrusted downloaded programs.
+This alpha does **not** yet provide Barnes–Hut repulsion, resumable simulation checkpoints, a packaged FFmpeg runtime, or a complete debugger. Rules produce a finite event plan before playback; they cannot inspect the evolving GPU positions or react to live solver state. Generation budgets derive from available memory, and progress watchdogs allow longer finite compilations while stopping stalled code. You can cancel generation. The JavaScript runtime is constrained for resource safety, but it is not a security boundary for running untrusted downloaded programs.
 
 ## Project status
 

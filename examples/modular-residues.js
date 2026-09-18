@@ -1,5 +1,5 @@
 /* @controls {
-  "count": {"type":"integer","label":"Nodes","default":100,"min":1,"max":8192},
+  "count": {"type":"integer","label":"Nodes","default":100,"min":1},
   "moduli": {"type":"json","label":"Moduli","default":[3,5,7]},
   "ticksPerNode": {"type":"integer","label":"Ticks between births","default":18,"min":0,"max":1000000},
   "finalTicks": {"type":"integer","label":"Final settling ticks","default":600,"min":0,"max":1000000},
@@ -13,10 +13,10 @@ function* generate(N, params) {
     const moduli = params.moduli ?? [3, 5, 7];
     const ticks = params.ticksPerNode ?? 18;
     const scaffold = params.scaffoldStrength ?? 0.6;
-    if (!Number.isInteger(count) || count < 1 || count > 8192) throw new Error("count must be 1–8192");
-    if (!Array.isArray(moduli) || moduli.length > 8192 ||
+    if (!Number.isSafeInteger(count) || count < 1) throw new Error("count must be a positive safe integer");
+    if (!Array.isArray(moduli) ||
         moduli.some(m => !Number.isSafeInteger(m) || m < 2)) {
-        throw new Error("moduli must contain at most 8192 safe integers greater than one");
+        throw new Error("moduli must contain safe integers greater than one");
     }
     // A distinct node colour for every residue of the first modulus.
     const nodeColors = N.palette(Math.min(count, moduli[0] ?? 3));

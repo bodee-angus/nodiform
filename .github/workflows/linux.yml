@@ -74,6 +74,7 @@ jobs:
           NODIFORM_SMOKE_THEME=light NODIFORM_SMOKE_EXAMPLE=complete NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/light-inputs.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_COMPACT=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-compact.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=abc NODIFORM_SMOKE_PARAMETERS='{"order":"branch-walk","ticksPerNode":6}' NODIFORM_SMOKE_HIDPI=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-hidpi.ppm" timeout 60s xvfb-run -a -s '-screen 0 3200x2000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+          NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=half NODIFORM_SMOKE_PARAMETERS='{"count":24,"interval":6}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-half-neighbourhood.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
 
       - name: Upload native interface captures
         uses: actions/upload-artifact@v4

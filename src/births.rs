@@ -6,7 +6,7 @@
 use bytemuck::{Pod, Zeroable};
 use eframe::wgpu::{self, util::DeviceExt};
 
-use crate::model::{Graph, MAX_EDGES, MAX_NODES};
+use crate::model::Graph;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -25,16 +25,40 @@ struct Parameters {
     padding: [u32; 2],
 }
 
+pub(crate) struct BirthPlan {
+    births: Vec<Birth>,
+    neighbours: Vec<u32>,
+    first: u32,
+    count: u32,
+}
+
+pub(crate) fn prepare_births(graph: &Graph, first: usize) -> Result<BirthPlan, String> {
+    let (births, neighbours) = prepare(graph, first)?;
+    Ok(BirthPlan {
+        births,
+        neighbours,
+        first: u32::try_from(first).map_err(|_| "Birth index exceeds GPU addressing")?,
+        count: u32::try_from(graph.nodes.len())
+            .map_err(|_| "Birth count exceeds GPU addressing")?,
+    })
+}
+
 pub(crate) struct BirthInitializer {
     births: wgpu::Buffer,
     neighbours: wgpu::Buffer,
     parameters: wgpu::Buffer,
     pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
     groups: [wgpu::BindGroup; 2],
 }
 
 impl BirthInitializer {
-    pub(crate) fn new(device: &wgpu::Device, positions: &[wgpu::Buffer; 2]) -> Self {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        positions: &[wgpu::Buffer; 2],
+        node_capacity: usize,
+        edge_capacity: usize,
+    ) -> Self {
         let buffer = |label, size| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -43,9 +67,9 @@ impl BirthInitializer {
                 mapped_at_creation: false,
             })
         };
-        let births = buffer("birth neighbourhoods", (MAX_NODES * 16) as u64);
+        let births = buffer("birth neighbourhoods", (node_capacity * 16) as u64);
         // Each unique undirected connection anchors only its later endpoint.
-        let neighbours = buffer("birth neighbour indices", (MAX_EDGES * 4) as u64);
+        let neighbours = buffer("birth neighbour indices", (edge_capacity * 4) as u64);
         let parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("birth parameters"),
             contents: bytemuck::bytes_of(&Parameters::zeroed()),
@@ -117,7 +141,59 @@ impl BirthInitializer {
             neighbours,
             parameters,
             pipeline,
+            layout,
             groups,
+        }
+    }
+
+    /// Rebuild bindings after storage growth. The placement pipeline is reused;
+    /// its scratch buffers have no live simulation state to copy.
+    pub(crate) fn with_capacity(
+        &self,
+        device: &wgpu::Device,
+        positions: &[wgpu::Buffer; 2],
+        node_capacity: usize,
+        edge_capacity: usize,
+    ) -> Self {
+        let buffer = |label, size| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let births = buffer("birth neighbourhoods", (node_capacity * 16) as u64);
+        let neighbours = buffer("birth neighbour indices", (edge_capacity * 4) as u64);
+        let groups = std::array::from_fn(|active| {
+            let buffers = [
+                &positions[active],
+                &positions[1 - active],
+                &births,
+                &neighbours,
+                &self.parameters,
+            ];
+            let entries: Vec<_> = buffers
+                .iter()
+                .enumerate()
+                .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                    binding: binding as u32,
+                    resource: buffer.as_entire_binding(),
+                })
+                .collect();
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("birth bindings"),
+                layout: &self.layout,
+                entries: &entries,
+            })
+        });
+        Self {
+            births,
+            neighbours,
+            groups,
+            parameters: self.parameters.clone(),
+            layout: self.layout.clone(),
+            pipeline: self.pipeline.clone(),
         }
     }
 
@@ -127,24 +203,22 @@ impl BirthInitializer {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        graph: &Graph,
-        first: usize,
+        plan: &BirthPlan,
         active: usize,
     ) {
-        if first >= graph.nodes.len() {
+        if plan.first >= plan.count {
             return;
         }
-        let (births, neighbours) = prepare(graph, first);
-        queue.write_buffer(&self.births, 0, bytemuck::cast_slice(&births));
-        if !neighbours.is_empty() {
-            queue.write_buffer(&self.neighbours, 0, bytemuck::cast_slice(&neighbours));
+        queue.write_buffer(&self.births, 0, bytemuck::cast_slice(&plan.births));
+        if !plan.neighbours.is_empty() {
+            queue.write_buffer(&self.neighbours, 0, bytemuck::cast_slice(&plan.neighbours));
         }
         queue.write_buffer(
             &self.parameters,
             0,
             bytemuck::bytes_of(&Parameters {
-                first: first as u32,
-                count: graph.nodes.len() as u32,
+                first: plan.first,
+                count: plan.count,
                 padding: [0; 2],
             }),
         );
@@ -166,31 +240,48 @@ impl BirthInitializer {
     }
 }
 
-fn prepare(graph: &Graph, first: usize) -> (Vec<Birth>, Vec<u32>) {
-    let mut predecessors = vec![Vec::new(); graph.nodes.len()];
+fn prepare(graph: &Graph, first: usize) -> Result<(Vec<Birth>, Vec<u32>), String> {
+    let mut predecessors = Vec::new();
+    predecessors
+        .try_reserve_exact(graph.nodes.len())
+        .map_err(|error| format!("Not enough memory to prepare birth neighbours: {error}"))?;
+    predecessors.resize_with(graph.nodes.len(), Vec::new);
     for edge in &graph.edges {
         let newer = edge.source.max(edge.target);
         let older = edge.source.min(edge.target);
         if newer >= first && newer != older && graph.nodes[newer].auto_position {
-            predecessors[newer].push(older as u32);
+            predecessors[newer].try_reserve(1).map_err(|error| {
+                format!("Not enough memory to prepare birth neighbours: {error}")
+            })?;
+            predecessors[newer].push(
+                u32::try_from(older).map_err(|_| "Birth neighbour index exceeds GPU addressing")?,
+            );
         }
     }
-    let mut births = Vec::with_capacity(graph.nodes.len());
+    let mut births = Vec::new();
+    births
+        .try_reserve_exact(graph.nodes.len())
+        .map_err(|error| format!("Not enough memory to prepare births: {error}"))?;
     let mut neighbours = Vec::new();
+    neighbours
+        .try_reserve_exact(graph.edges.len())
+        .map_err(|error| format!("Not enough memory to prepare birth neighbours: {error}"))?;
     for (node, mut indices) in graph.nodes.iter().zip(predecessors) {
         // Parallel and reciprocal edges still represent the same neighbour.
         // Strength does not affect the birth centroid, including zero strength.
         indices.sort_unstable();
         indices.dedup();
         births.push(Birth {
-            offset: neighbours.len() as u32,
-            count: indices.len() as u32,
+            offset: u32::try_from(neighbours.len())
+                .map_err(|_| "Birth neighbour offsets exceed GPU addressing")?,
+            count: u32::try_from(indices.len())
+                .map_err(|_| "Birth neighbour count exceeds GPU addressing")?,
             automatic: u32::from(node.auto_position),
             padding: 0,
         });
         neighbours.extend(indices);
     }
-    (births, neighbours)
+    Ok((births, neighbours))
 }
 
 /// Called from the explicit software-Vulkan smoke test, which owns the device.
@@ -220,7 +311,7 @@ pub(crate) fn validate_gpu_births(gpu: &mut crate::gpu::GpuGraph) {
             "edges":[{"id":"AB","source":"A","target":"B","strength":1}]
         }"##,
     );
-    gpu.sync_graph(&graph, true);
+    gpu.sync_graph(&graph, true).unwrap();
     // An odd number selects the other ping-pong buffer, and evolves the
     // anchors far enough to distinguish live coordinates from birth hints.
     gpu.step(7);
@@ -249,7 +340,7 @@ pub(crate) fn validate_gpu_births(gpu: &mut crate::gpu::GpuGraph) {
             ]
         }"##,
     );
-    gpu.sync_graph(&graph, false);
+    gpu.sync_graph(&graph, false).unwrap();
     let born = gpu.read_positions(graph.nodes.len()).unwrap();
     assert_eq!(&born[..2], &anchors);
     let centre = [
@@ -288,12 +379,12 @@ pub(crate) fn validate_gpu_births(gpu: &mut crate::gpu::GpuGraph) {
         &mut graph,
         r##"{"op":"batch","edges":[{"id":"EA","source":"E","target":"A"}]}"##,
     );
-    gpu.sync_graph(&graph, false);
+    gpu.sync_graph(&graph, false).unwrap();
     assert_eq!(gpu.read_positions(graph.nodes.len()).unwrap(), born);
 
     // Reset resolves every birth afresh from explicit parent coordinates,
     // never by adding a centroid again to an already-resolved position.
-    gpu.sync_graph(&graph, true);
+    gpu.sync_graph(&graph, true).unwrap();
     let reset = gpu.read_positions(graph.nodes.len()).unwrap();
     near(
         reset[2],
@@ -305,7 +396,7 @@ pub(crate) fn validate_gpu_births(gpu: &mut crate::gpu::GpuGraph) {
     gpu.step(8);
     let replay = gpu.read_positions(graph.nodes.len()).unwrap();
     assert!(replay.iter().flatten().all(|value| value.is_finite()));
-    gpu.sync_graph(&graph, true);
+    gpu.sync_graph(&graph, true).unwrap();
     gpu.step(8);
     assert_eq!(gpu.read_positions(graph.nodes.len()).unwrap(), replay);
 }
@@ -335,7 +426,7 @@ mod tests {
         )
         .unwrap();
         graph.apply(&event).unwrap();
-        let (births, neighbours) = prepare(&graph, 0);
+        let (births, neighbours) = prepare(&graph, 0).unwrap();
         assert_eq!(
             births.iter().map(|b| b.count).collect::<Vec<_>>(),
             [0, 0, 2, 1]
@@ -344,7 +435,7 @@ mod tests {
         assert!(births.iter().all(|birth| birth.automatic == 1));
         // Once C exists, a later sync only places D. Existing nodes never
         // acquire a new automatic birth merely because their edges changed.
-        let (births, neighbours) = prepare(&graph, 3);
+        let (births, neighbours) = prepare(&graph, 3).unwrap();
         assert_eq!(
             births.iter().map(|b| b.count).collect::<Vec<_>>(),
             [0, 0, 0, 1]
@@ -367,7 +458,7 @@ mod tests {
         )
         .unwrap();
         graph.apply(&event).unwrap();
-        let (births, neighbours) = prepare(&graph, 0);
+        let (births, neighbours) = prepare(&graph, 0).unwrap();
         assert_eq!(births[1].automatic, 0);
         assert_eq!(births[1].count, 0);
         assert_eq!(graph.nodes[1].position, [20.0, -5.0]);

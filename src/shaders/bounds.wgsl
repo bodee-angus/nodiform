@@ -17,7 +17,7 @@ struct Frame {
 @group(0) @binding(2) var<storage, read_write> camera: Camera;
 @group(0) @binding(3) var<uniform> frame: Frame;
 
-// One GPU lane is deliberately used for this bounded 8,192-node first engine.
+// This linear bounds reduction visits all live nodes on the GPU.
 // Bounds never leave the GPU and include each node's world-space radius.
 @compute @workgroup_size(1)
 fn main() {

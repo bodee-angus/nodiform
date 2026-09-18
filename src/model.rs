@@ -2,10 +2,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-pub const MAX_NODES: usize = 8_192;
-// A complete 500-node graph has 124,750 edges. Keep the bounded exact solver
-// useful for dense experiments as well as sparse growth rules.
-pub const MAX_EDGES: usize = 250_000;
 pub const BIRTH_PLACEMENT_VERSION: &str = "live-neighbour-centroid-v2";
 /// Pinned force parameters shared by the solver, defaults and recording metadata.
 pub const FORCE_VERSION: &str = "nodiform-force-v3";
@@ -148,9 +144,18 @@ impl Graph {
 
     /// A rejected event leaves the graph entirely unchanged.
     pub fn apply(&mut self, event: &Event) -> Result<(), String> {
+        self.apply_with_progress(event, || {})
+    }
+
+    /// Long native validation passes also report progress to the rule worker.
+    pub fn apply_with_progress(
+        &mut self,
+        event: &Event,
+        mut progress: impl FnMut(),
+    ) -> Result<(), String> {
         match event {
             Event::Wait { .. } => Ok(()),
-            Event::Batch { nodes, edges } => self.apply_batch(nodes, edges),
+            Event::Batch { nodes, edges } => self.apply_batch(nodes, edges, &mut progress),
             Event::SetNode { id, color, radius } => {
                 let &index = self
                     .node_indices
@@ -198,21 +203,42 @@ impl Graph {
         }
     }
 
-    fn apply_batch(&mut self, nodes: &[NodeSpec], edges: &[EdgeSpec]) -> Result<(), String> {
-        if nodes.len() > MAX_NODES.saturating_sub(self.nodes.len()) {
-            return Err(format!(
-                "This exact-solver build allows at most {MAX_NODES} nodes"
-            ));
-        }
-        if edges.len() > MAX_EDGES.saturating_sub(self.edges.len()) {
-            return Err(format!("This build allows at most {MAX_EDGES} edges"));
-        }
-        let mut new_nodes = Vec::with_capacity(nodes.len());
-        let mut new_edges = Vec::with_capacity(edges.len());
-        let mut staged_nodes = HashMap::with_capacity(nodes.len());
-        let mut staged_edges = HashSet::with_capacity(edges.len());
+    fn apply_batch(
+        &mut self,
+        nodes: &[NodeSpec],
+        edges: &[EdgeSpec],
+        progress: &mut impl FnMut(),
+    ) -> Result<(), String> {
+        self.nodes
+            .len()
+            .checked_add(nodes.len())
+            .ok_or_else(|| "Node count exceeds addressable memory".to_string())?;
+        self.edges
+            .len()
+            .checked_add(edges.len())
+            .ok_or_else(|| "Edge count exceeds addressable memory".to_string())?;
+        let allocation_error = |error| format!("Cannot allocate graph memory: {error}");
+        let mut new_nodes = Vec::new();
+        let mut new_edges = Vec::new();
+        let mut staged_nodes = HashMap::new();
+        let mut staged_edges = HashSet::new();
+        new_nodes
+            .try_reserve(nodes.len())
+            .map_err(allocation_error)?;
+        new_edges
+            .try_reserve(edges.len())
+            .map_err(allocation_error)?;
+        staged_nodes
+            .try_reserve(nodes.len())
+            .map_err(allocation_error)?;
+        staged_edges
+            .try_reserve(edges.len())
+            .map_err(allocation_error)?;
 
-        for spec in nodes {
+        for (index, spec) in nodes.iter().enumerate() {
+            if index & 1023 == 0 {
+                progress();
+            }
             validate_id(&spec.id)?;
             if self.node_indices.contains_key(&spec.id) || staged_nodes.contains_key(&spec.id) {
                 return Err(format!("Duplicate node ID '{}'", spec.id));
@@ -246,7 +272,10 @@ impl Graph {
             });
         }
 
-        for spec in edges {
+        for (index, spec) in edges.iter().enumerate() {
+            if index & 1023 == 0 {
+                progress();
+            }
             validate_id(&spec.id)?;
             if self.edge_indices.contains_key(&spec.id) || !staged_edges.insert(spec.id.clone()) {
                 return Err(format!("Duplicate edge ID '{}'", spec.id));
@@ -269,12 +298,32 @@ impl Graph {
             });
         }
 
+        // Reserve before committing, so allocation failure cannot partly apply a batch.
+        self.nodes
+            .try_reserve(nodes.len())
+            .map_err(allocation_error)?;
+        self.edges
+            .try_reserve(edges.len())
+            .map_err(allocation_error)?;
+        self.node_indices
+            .try_reserve(nodes.len())
+            .map_err(allocation_error)?;
+        self.edge_indices
+            .try_reserve(edges.len())
+            .map_err(allocation_error)?;
+
         // Commit only after every node and edge has passed validation.
-        for node in new_nodes {
+        for (index, node) in new_nodes.into_iter().enumerate() {
+            if index & 1023 == 0 {
+                progress();
+            }
             self.node_indices.insert(node.id.clone(), self.nodes.len());
             self.nodes.push(node);
         }
-        for edge in new_edges {
+        for (index, edge) in new_edges.into_iter().enumerate() {
+            if index & 1023 == 0 {
+                progress();
+            }
             self.edge_indices.insert(edge.id.clone(), self.edges.len());
             self.edges.push(edge);
         }
@@ -495,39 +544,43 @@ mod tests {
     }
 
     #[test]
-    fn edge_capacity_accepts_boundary_and_rejects_next_batch_atomically() {
+    fn graph_grows_past_former_node_and_edge_ceilings() {
         let mut graph = Graph::new(7);
-        // Parallel edges are valid: use them to exercise the exact capacity
-        // without conflating an edge limit with a particular node count.
         graph
             .apply(&Event::Batch {
-                nodes: vec![node("a"), node("b")],
-                edges: (0..MAX_EDGES)
-                    .map(|index| edge(&format!("e:{index}"), "a", "b"))
+                nodes: (0..8_193).map(|index| node(&index.to_string())).collect(),
+                edges: (0..250_001)
+                    .map(|index| edge(&format!("e:{index}"), "0", "1"))
                     .collect(),
             })
             .unwrap();
-        assert_eq!(graph.edges.len(), MAX_EDGES);
-        let error = graph
+        assert_eq!(graph.nodes.len(), 8_193);
+        assert_eq!(graph.edges.len(), 250_001);
+        graph
             .apply(&Event::Batch {
-                nodes: vec![node("c")],
-                edges: vec![edge("overflow", "b", "c")],
+                nodes: vec![node("later")],
+                edges: vec![edge("later-edge", "8192", "later")],
             })
-            .unwrap_err();
-        assert!(error.contains(&MAX_EDGES.to_string()));
-        assert_eq!(graph.nodes.len(), 2);
-        assert_eq!(graph.edges.len(), MAX_EDGES);
-        assert!(!graph.node_indices.contains_key("c"));
-        assert!(!graph.edge_indices.contains_key("overflow"));
+            .unwrap();
+        assert_eq!(graph.nodes.len(), 8_194);
+        assert_eq!(graph.edges.len(), 250_002);
+        let before = serde_json::to_string(&graph).unwrap();
+        assert!(graph
+            .apply(&Event::Batch {
+                nodes: vec![node("uncommitted")],
+                edges: vec![edge("invalid", "uncommitted", "missing")],
+            })
+            .is_err());
+        assert_eq!(before, serde_json::to_string(&graph).unwrap());
         graph
             .apply(&Event::SetEdge {
-                id: format!("e:{}", MAX_EDGES - 1),
+                id: "e:250000".into(),
                 color: None,
                 strength: Some(0.25),
                 gradient: None,
             })
             .unwrap();
-        assert_eq!(graph.edges.last().unwrap().strength, 0.25);
+        assert_eq!(graph.edges[250_000].strength, 0.25);
     }
     #[test]
     fn zero_weight_edges_do_not_bind_components() {

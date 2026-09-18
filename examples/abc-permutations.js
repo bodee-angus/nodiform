@@ -1,6 +1,6 @@
 /* @controls {
   "alphabet": {"type":"text","label":"Alphabet","default":"ABC"},
-  "maxLength": {"type":"integer","label":"Maximum length","default":3,"min":1,"max":10},
+  "maxLength": {"type":"integer","label":"Maximum length","default":3,"min":1},
   "repetitions": {"type":"boolean","label":"Repeat letters","default":false},
   "order": {"type":"select","label":"Birth order","default":"lexicographic","options":["lexicographic","reverse","shuffle","branch-walk"]},
   "ticksPerNode": {"type":"integer","label":"Ticks between births","default":24,"min":0,"max":1000000},
@@ -22,55 +22,88 @@ function* generate(N, params) {
         throw new Error('order must be "lexicographic", "reverse", "shuffle", or "branch-walk"');
     }
     if (new Set(alphabet).size !== alphabet.length) throw new Error("Alphabet characters must be unique");
-    if (alphabet.length < 1 || !Number.isInteger(maxLength) || maxLength < 1 || maxLength > 10) {
-        throw new Error("Use a nonempty alphabet and an integer maxLength from 1 to 10");
+    if (alphabet.length < 1 || !Number.isSafeInteger(maxLength) || maxLength < 1) {
+        throw new Error("Use a nonempty alphabet and a positive safe integer maxLength");
     }
-    // Count before allocating words: factorial growth must fit the graph budget.
-    let layerCount = 1;
-    let total = 0;
-    for (let length = 1; length <= maxLength; length++) {
-        layerCount *= repeat ? alphabet.length : Math.max(0, alphabet.length - length + 1);
-        total += layerCount;
-        if (total > 8192) throw new Error("This experiment exceeds 8192 nodes; reduce alphabet or maximum length");
-    }
+    // Without repetition, no word can exceed the number of available letters.
+    const depthLimit = repeat ? maxLength : Math.min(maxLength, alphabet.length);
     const colors = N.palette(alphabet.length);
     const letterColors = new Map(alphabet.map((letter, index) => [letter, colors[index]]));
-    function* words(length, prefix = "") {
-        if (Array.from(prefix).length === length) { yield prefix; return; }
-        for (const letter of alphabet) {
-            if (repeat || !Array.from(prefix).includes(letter)) yield* words(length, prefix + letter);
+    const sortedAlphabet = [...alphabet].sort();
+    function* words(length, letters = sortedAlphabet) {
+        // Keep traversal state on an explicit stack, so depth is not limited
+        // by JavaScript recursion. Ordered layers stream one word at a time.
+        const prefix = [];
+        const next = [0];
+        while (next.length) {
+            if (prefix.length === length) {
+                yield prefix.join("");
+                prefix.pop();
+                next.pop();
+                continue;
+            }
+            const index = next[prefix.length]++;
+            if (index === letters.length) {
+                next.pop();
+                if (prefix.length) prefix.pop();
+                continue;
+            }
+            const letter = letters[index];
+            if (!repeat && prefix.includes(letter)) continue;
+            prefix.push(letter);
+            next.push(0);
         }
     }
-    function* branch(prefix, backwards = false) {
+    function* branch(root) {
         // A forward subtree starts at its prefix. Alternate child subtrees
         // forward/reversed; reversing a subtree also moves its prefix last.
         // Top-level groups stay in alphabet order. ABC therefore starts:
         // A, AB, ABC, ACB, AC, B, BA, BAC, BCA, BC, C, CA, CAB, CBA, CB.
-        if (!backwards) yield prefix.join("");
-        if (prefix.length < maxLength) {
-            const children = alphabet.filter(letter => repeat || !prefix.includes(letter));
-            for (let step = 0; step < children.length; step++) {
-                const index = backwards ? children.length - 1 - step : step;
-                yield* branch([...prefix, children[index]], backwards !== (index % 2 === 1));
+        const prefix = [root];
+        const stack = [{ backwards: false, children: null, step: 0 }];
+        while (stack.length) {
+            const frame = stack[stack.length - 1];
+            if (frame.children === null) {
+                if (!frame.backwards) yield prefix.join("");
+                frame.children = prefix.length < depthLimit
+                    ? alphabet.filter(letter => repeat || !prefix.includes(letter))
+                    : [];
+            }
+            if (frame.step < frame.children.length) {
+                const index = frame.backwards
+                    ? frame.children.length - 1 - frame.step
+                    : frame.step;
+                frame.step++;
+                prefix.push(frame.children[index]);
+                stack.push({
+                    backwards: frame.backwards !== (index % 2 === 1),
+                    children: null,
+                    step: 0
+                });
+            } else {
+                if (frame.backwards) yield prefix.join("");
+                stack.pop();
+                prefix.pop();
             }
         }
-        if (backwards) yield prefix.join("");
     }
     function* births() {
         if (order === "branch-walk") {
-            for (const letter of alphabet) yield* branch([letter]);
+            for (const letter of alphabet) yield* branch(letter);
             return;
         }
-        for (let length = 1; length <= maxLength; length++) {
-            const layer = Array.from(words(length)).sort();
-            if (order === "reverse") layer.reverse();
+        const letters = order === "reverse" ? [...sortedAlphabet].reverse() : sortedAlphabet;
+        for (let length = 1; length <= depthLimit; length++) {
             if (order === "shuffle") {
+                // Shuffling needs the current layer in memory; ordered modes
+                // and branch-walk do not allocate an entire layer up front.
+                const layer = Array.from(words(length));
                 for (let i = layer.length - 1; i > 0; i--) {
                     const j = Math.floor(N.random() * (i + 1));
                     [layer[i], layer[j]] = [layer[j], layer[i]];
                 }
-            }
-            yield* layer;
+                yield* layer;
+            } else yield* words(length, letters);
         }
     }
     const born = new Set();

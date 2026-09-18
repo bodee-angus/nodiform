@@ -3,11 +3,15 @@
 // https://bottosson.github.io/posts/oklab/ (2021-01-25 matrices).
 // The first 128 colours maximise the nearest Oklab distance among a fixed set
 // of vivid candidates. Larger palettes continue with low-discrepancy OKLCH
-// sampling. Hex values remain unique, but thousands cannot be visually distinct.
+// sampling. Duplicate retries are bounded: very large palettes may repeat hex
+// values, and thousands of colours cannot all be visually distinct.
 (() => {
     'use strict';
-    const integer = Number.isInteger;
+    // Captured only inside the private bundled runner; standalone use needs no host.
+    const reportProgress = typeof checkpointHost === 'function' ? checkpointHost : () => {};
+    const integer = Number.isSafeInteger;
     const slice = Function.prototype.call.bind(Array.prototype.slice);
+    const push = Function.prototype.call.bind(Array.prototype.push);
     const has = Function.prototype.call.bind(Set.prototype.has);
     const add = Function.prototype.call.bind(Set.prototype.add);
     const ErrorType = Error;
@@ -89,7 +93,7 @@
                 best = candidate;
             }
         }
-        chosen[chosen.length] = best.hex;
+        push(chosen, best.hex);
         add(used, best.hex);
         for (let index = 0; index < candidates.length; index++) {
             const candidate = candidates[index];
@@ -101,25 +105,29 @@
     }
 
     return function palette(count) {
-        if (!integer(count) || count < 0 || count > 8192) {
-            throw new ErrorType('palette(count) requires an integer from 0 to 8192');
+        if (!integer(count) || count < 0) {
+            throw new ErrorType('palette(count) requires a nonnegative safe integer');
         }
         if (count === 0) return [];
         initialise();
         while (chosen.length < math.min(count, 128)) chooseNext();
         while (chosen.length < count) {
-            if (extension >= 32768) throw new ErrorType('Palette candidate budget exhausted');
-            extension += 1;
-            // Different irrational steps spread hue, lightness and saturation
-            // without using or changing the experiment's seeded random stream.
-            const hue = (extension * 0.6180339887498949 + 255 / 360) % 1;
-            const lightness = 0.64 + 0.18 * ((extension * 0.4142135623730951) % 1);
-            const saturation = 0.82 + 0.16 * ((extension * 0.7320508075688772) % 1);
-            const colour = vivid(lightness, hue, saturation);
-            if (!has(used, colour.hex)) {
-                chosen[chosen.length] = colour.hex;
-                add(used, colour.hex);
+            if ((chosen.length & 255) === 0) reportProgress();
+            let colour;
+            // A finite colour space cannot supply unlimited unique hex codes.
+            // Bound retries rather than exhausting a budget or looping forever.
+            for (let attempt = 0; attempt < 32; attempt++) {
+                extension += 1;
+                // Different irrational steps spread hue, lightness and saturation
+                // without using or changing the experiment's seeded random stream.
+                const hue = (extension * 0.6180339887498949 + 255 / 360) % 1;
+                const lightness = 0.64 + 0.18 * ((extension * 0.4142135623730951) % 1);
+                const saturation = 0.82 + 0.16 * ((extension * 0.7320508075688772) % 1);
+                colour = vivid(lightness, hue, saturation);
+                if (!has(used, colour.hex)) break;
             }
+            push(chosen, colour.hex);
+            add(used, colour.hex);
         }
         // Caller edits must never affect a later palette request.
         return slice(chosen, 0, count);

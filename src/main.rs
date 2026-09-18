@@ -36,6 +36,19 @@ fn main() -> eframe::Result {
     };
     let mut wgpu_setup = eframe::egui_wgpu::WgpuSetupCreateNew::default();
     wgpu_setup.instance_descriptor.backends = eframe::wgpu::Backends::VULKAN;
+    let default_descriptor = wgpu_setup.device_descriptor.clone();
+    wgpu_setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+        let mut descriptor = default_descriptor(adapter);
+        let supported = adapter.limits();
+        descriptor.required_limits.max_buffer_size = supported.max_buffer_size;
+        descriptor.required_limits.max_storage_buffer_binding_size =
+            supported.max_storage_buffer_binding_size;
+        descriptor
+            .required_limits
+            .max_compute_workgroups_per_dimension = supported.max_compute_workgroups_per_dimension;
+        descriptor.required_limits.max_texture_dimension_2d = supported.max_texture_dimension_2d;
+        descriptor
+    });
     let window_size = if smoke_test.is_some()
         && std::env::var("NODIFORM_SMOKE_HIDPI").as_deref() == Ok("1")
     {
@@ -63,7 +76,7 @@ fn main() -> eframe::Result {
     let result = eframe::run_native(
         "Nodiform",
         options,
-        Box::new(move |context| Ok(Box::new(app::NodiformApp::new(context, smoke_probe)))),
+        Box::new(move |context| Ok(Box::new(app::NodiformApp::new(context, smoke_probe)?))),
     );
     if let Some(test) = smoke_test {
         let passed = test.finish(result.as_ref().err().map(ToString::to_string));

@@ -75,6 +75,7 @@ impl NodiformApp {
                             ui.menu_button("Examples", |ui| {
                                 for (id, label) in [
                                     ("complete", "Connect to every earlier node"),
+                                    ("half", "Connect to the previous half"),
                                     ("ring", "Growing ring"),
                                     ("abc", "Letter permutations"),
                                     ("modular", "Modular residues"),
@@ -545,6 +546,7 @@ impl NodiformApp {
     pub(super) fn load_example(&mut self, id: &str) {
         let source = match id {
             "complete" => include_str!("../../examples/complete-growth.js"),
+            "half" => include_str!("../../examples/half-neighbourhood.js"),
             "abc" => include_str!("../../examples/abc-permutations.js"),
             "ring" => include_str!("../../examples/ring.js"),
             "modular" => include_str!("../../examples/modular-residues.js"),

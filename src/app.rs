@@ -107,7 +107,10 @@ pub struct NodiformApp {
 }
 
 impl NodiformApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, smoke_probe: Option<SmokeProbe>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        smoke_probe: Option<SmokeProbe>,
+    ) -> Result<Self, String> {
         let theme_preference = if smoke_probe.is_some() {
             match std::env::var("NODIFORM_SMOKE_THEME").as_deref() {
                 Ok("dark") => egui::ThemePreference::Dark,
@@ -124,15 +127,15 @@ impl NodiformApp {
         let render_state = cc
             .wgpu_render_state
             .clone()
-            .expect("Nodiform requires a compute-capable GPU");
+            .ok_or("Nodiform requires a compute-capable GPU")?;
         let info = render_state.adapter.get_info();
         let adapter = format!("{} · {:?}", info.name, info.backend);
         let mut gpu = GpuGraph::new(
             Arc::new(render_state.device.clone()),
             Arc::new(render_state.queue.clone()),
-        );
+        )?;
         let graph = Graph::new(42);
-        gpu.sync_graph(&graph, true);
+        gpu.sync_graph(&graph, true)?;
         gpu.render_preview(1, 1);
         let texture = render_state.renderer.write().register_native_texture(
             &render_state.device,
@@ -201,7 +204,7 @@ impl NodiformApp {
             // Preview never creates a project, recording or output directory.
             app.request(Intent::Preview);
         }
-        app
+        Ok(app)
     }
 
     fn busy(&self) -> bool {
@@ -341,6 +344,12 @@ impl NodiformApp {
     }
 
     fn start(&mut self, intent: Intent, snapshot: Project, plan: Plan) -> Result<(), String> {
+        self.gpu
+            .validate_capacity(plan.node_count, plan.edge_count)?;
+        let planned_ticks = plan
+            .total_ticks
+            .checked_add(u64::from(snapshot.tail_ticks))
+            .ok_or("Total simulation duration including settling ticks overflowed")?;
         if intent == Intent::Validate {
             self.status = format!(
                 "Rules valid · {} nodes · {} edges · {} explicit ticks",
@@ -363,7 +372,7 @@ impl NodiformApp {
                 "forces":{"version":crate::model::FORCE_VERSION,"repulsion":crate::model::REPULSION,"default_edge_strength":crate::model::DEFAULT_EDGE_STRENGTH,"softening_squared":crate::model::SOFTENING_SQUARED,"rest_length":0,"gravity":0,"momentum_retention":crate::model::MOMENTUM_RETENTION,"max_displacement":crate::model::MAX_DISPLACEMENT,"base_timestep":crate::model::BASE_TIMESTEP,"step_policy":"min(base_timestep,0.5/max_incident_strength)"},
                 "birth_placement":crate::model::BIRTH_PLACEMENT_VERSION,
                 "ticks_per_frame":snapshot.ticks_per_frame,
-                "planned_ticks":plan.total_ticks + u64::from(snapshot.tail_ticks),
+                "planned_ticks":planned_ticks,
                 "planned_nodes":plan.node_count,"planned_edges":plan.edge_count,
                 "frame_sampling":"after each ticks_per_frame ticks; final partial interval included",
                 "cross_device_bit_identical":false
@@ -377,14 +386,13 @@ impl NodiformApp {
             self.status = "Checking the selected video encoder…".into();
             return Ok(());
         }
-        self.begin_simulation(snapshot, plan);
-        Ok(())
+        self.begin_simulation(snapshot, plan)
     }
 
-    fn begin_simulation(&mut self, snapshot: Project, plan: Plan) {
+    fn begin_simulation(&mut self, snapshot: Project, plan: Plan) -> Result<(), String> {
         self.graph = Graph::new(snapshot.seed);
         self.gpu.set_degree_sizing(snapshot.size_by_connections);
-        self.gpu.sync_graph(&self.graph, true);
+        self.gpu.sync_graph(&self.graph, true)?;
         self.timeline = Some(Timeline::new(plan, snapshot.tail_ticks));
         self.project = snapshot;
         self.pending_frame = None;
@@ -402,6 +410,7 @@ impl NodiformApp {
             "Preview running · no video files are being written."
         }
         .into();
+        Ok(())
     }
 
     fn stop(&mut self) {
@@ -491,7 +500,7 @@ impl NodiformApp {
             let (changed, ticks) = timeline.next(&mut self.graph, budget)?;
             self.tick = timeline.tick;
             if changed {
-                self.gpu.sync_graph(&self.graph, false);
+                self.gpu.sync_graph(&self.graph, false)?;
                 self.components = self.graph.component_count();
             }
             if ticks > 0 {
@@ -507,7 +516,7 @@ impl NodiformApp {
             let (changed, _) = timeline.next(&mut self.graph, 0)?;
             self.last_event = timeline.cursor;
             if changed {
-                self.gpu.sync_graph(&self.graph, false);
+                self.gpu.sync_graph(&self.graph, false)?;
                 self.components = self.graph.component_count();
             }
         }
@@ -536,7 +545,10 @@ impl NodiformApp {
                 Ok(recorder) => {
                     self.recorder = Some(recorder);
                     if let Some((snapshot, plan)) = self.prepared_run.take() {
-                        self.begin_simulation(snapshot, plan);
+                        if let Err(error) = self.begin_simulation(snapshot, plan) {
+                            self.error = Some(error);
+                            self.stop();
+                        }
                     }
                 }
                 Err(error) => {

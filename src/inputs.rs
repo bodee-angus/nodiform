@@ -1,6 +1,7 @@
 //! A source-driven form. The application has no knowledge of experiment-specific keys.
 use crate::experiment::{
-    parse_controls, validate_parameters, validate_value, ControlKind, ControlSpec,
+    is_safe_integer, parse_controls, validate_parameters, validate_value, ControlKind, ControlSpec,
+    MAX_SAFE_INTEGER,
 };
 use crate::theme::Palette;
 use eframe::egui::{self, Color32, RichText};
@@ -189,17 +190,17 @@ fn field(
             });
             let mut widget = egui::DragValue::new(&mut number)
                 .speed(step)
-                .range(spec.min.unwrap_or(-1_000_000.0)..=spec.max.unwrap_or(1_000_000.0))
+                .range(numeric_range(spec))
+                // Validate typed values before DragValue clamps them. An unsafe
+                // integer must never silently become a different valid count.
+                .custom_parser(|text| parse_numeric_input(spec, text))
+                .custom_formatter(|number, _| number.to_string())
                 .clamp_existing_to_range(false);
             if spec.kind == ControlKind::Integer {
                 widget = widget.max_decimals(0);
             }
             if ui.add(widget).changed() {
-                if spec.kind == ControlKind::Integer {
-                    Some(Value::from(number.round() as i64))
-                } else {
-                    serde_json::Number::from_f64(number).map(Value::Number)
-                }
+                numeric_value(spec, number)
             } else {
                 None
             }
@@ -237,6 +238,34 @@ fn field(
     replacement
         .filter(|value| validate_value(spec, value).is_ok())
         .map(ControlAction::Set)
+}
+
+fn numeric_range(spec: &ControlSpec) -> std::ops::RangeInclusive<f64> {
+    let limit = if spec.kind == ControlKind::Integer {
+        MAX_SAFE_INTEGER
+    } else {
+        f64::MAX
+    };
+    spec.min.unwrap_or(-limit)..=spec.max.unwrap_or(limit)
+}
+
+fn numeric_value(spec: &ControlSpec, number: f64) -> Option<Value> {
+    let value = if spec.kind == ControlKind::Integer {
+        if !is_safe_integer(number) {
+            return None;
+        }
+        Value::from(number as i64)
+    } else {
+        Value::Number(serde_json::Number::from_f64(number)?)
+    };
+    validate_value(spec, &value).ok()?;
+    Some(value)
+}
+
+fn parse_numeric_input(spec: &ControlSpec, text: &str) -> Option<f64> {
+    let number = text.trim().parse::<f64>().ok()?;
+    numeric_value(spec, number)?;
+    Some(number)
 }
 
 #[derive(Clone)]
@@ -593,5 +622,45 @@ mod tests {
         assert!(validate_string_draft(&controls["title"], &mut text, true).is_err());
         assert_eq!(text.observed, "short");
         assert_eq!(text.text.len(), 16_385);
+    }
+
+    #[test]
+    fn large_numeric_inputs_roundtrip_without_a_hidden_million_limit() {
+        let source = r#"/* @controls {
+            "count":{"type":"integer","label":"Count","default":2000000},
+            "scale":{"type":"number","label":"Scale","default":1e100},
+            "bounded":{"type":"integer","label":"Bounded","default":1,"min":1,"max":2000000}
+        } */"#;
+        let controls = parse_controls(source).unwrap();
+        let count = &controls["count"];
+        assert_eq!(numeric_range(count), -MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER);
+        for integer in [2_000_000_i64, 9_000_000_000, 9_007_199_254_740_991] {
+            let parsed = parse_numeric_input(count, &integer.to_string()).unwrap();
+            assert_eq!(numeric_value(count, parsed), Some(json!(integer)));
+        }
+        for invalid in [
+            "9007199254740992",
+            "9007199254740993",
+            "2000000.5",
+            "NaN",
+            "inf",
+        ] {
+            assert!(parse_numeric_input(count, invalid).is_none(), "{invalid}");
+        }
+        assert_eq!(parse_numeric_input(count, "2e6"), Some(2_000_000.0));
+        assert!(parse_numeric_input(&controls["bounded"], "2000001").is_none());
+        assert_eq!(numeric_range(&controls["scale"]), -f64::MAX..=f64::MAX);
+        assert_eq!(
+            parse_numeric_input(&controls["scale"], "1e100"),
+            Some(1e100)
+        );
+
+        let context = egui::Context::default();
+        let mut parameters = r#"{"count":9007199254740991}"#.to_owned();
+        let before = parameters.clone();
+        let text = render(&context, source, &mut parameters).join("\n");
+        assert!(text.contains("9007199254740991"), "{text}");
+        assert!(!text.contains("within ±1000000"), "{text}");
+        assert_eq!(parameters, before);
     }
 }

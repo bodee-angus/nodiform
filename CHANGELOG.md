@@ -1,5 +1,15 @@
 # Release changes
 
+## 0.1.5
+
+- Added **Connect to the previous half**: node `n` connects to the most recent `floor(n / 2)` earlier nodes. It defaults to 500 nodes and 62,500 edges, with script-defined inputs and no fixed count ceiling.
+- Removed the fixed 8,192-node and 250,000-edge caps. GPU storage now grows with the graph, preserving existing positions and momentum. Actual device buffer, dispatch and index limits still apply, and allocation failures report insufficient memory.
+- Reworked rule generation to validate each emitted event directly rather than retaining a second, large JSON plan inside JavaScript. Heap and plan budgets now derive from available memory; fixed event-count and generated-JSON ceilings are removed. Watchdogs track lack of progress instead of limiting every compilation to a short total duration.
+- Removed the bundled examples’ former count ceilings and permutation length ceiling. Permutation traversal uses an explicit stack; lexicographic and reverse layers stream their words. The existing branch-walk order is unchanged.
+- Removed the palette helper’s 8,192-colour ceiling and the Inputs panel’s implicit numeric ceiling. Script-declared input bounds and numeric representation limits remain. Larger palettes preserve existing colour prefixes, but may repeat hex codes.
+
+Existing saved and custom scripts keep their own source, including any `8192` guard or input `max`. Load an updated example or edit those restrictions explicitly. The rule API is now `nodiform-rules-v4`; `nodiform-force-v3` and `live-neighbour-centroid-v2` are unchanged. The exact O(N²) solver remains, so larger graphs can be very slow and must fit available RAM and GPU memory. The AppImage continues to use the existing Gear Lever update channel.
+
 ## 0.1.4
 
 - New nodes without an explicit position appear near the current centre of their already-created connected neighbours, with a small deterministic offset. With no such neighbours, they start near the world origin. Later connections do not teleport existing nodes; explicit initial positions remain supported.

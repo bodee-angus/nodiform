@@ -1,5 +1,5 @@
 /* @controls {
-  "count": {"type":"integer","label":"Nodes","default":80,"min":1,"max":8192},
+  "count": {"type":"integer","label":"Nodes","default":80,"min":1},
   "ticksPerNode": {"type":"integer","label":"Ticks between births","default":12,"min":0,"max":1000000},
   "finalTicks": {"type":"integer","label":"Final settling ticks","default":0,"min":0,"max":1000000}
 } */
@@ -9,8 +9,8 @@
 function* generate(N, params) {
     const count = params.count ?? 80;
     const ticks = params.ticksPerNode ?? 12;
-    if (!Number.isInteger(count) || count < 1 || count > 8192) {
-        throw new Error("count must be an integer from 1 to 8192");
+    if (!Number.isSafeInteger(count) || count < 1) {
+        throw new Error("count must be a positive safe integer");
     }
     const colors = N.palette(Math.min(count, 8));
     for (let n = 0; n < count; n++) {

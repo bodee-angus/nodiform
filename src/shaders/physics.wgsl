@@ -30,9 +30,10 @@ struct Neighbour {
 var<workgroup> tile: array<vec2<f32>, 128>;
 
 @compute @workgroup_size(128)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+fn main(@builtin(workgroup_id) wid: vec3<u32>,
+        @builtin(num_workgroups) workgroups: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>) {
-    let i = gid.x;
+    let i = (wid.y * workgroups.x + wid.x) * 128u + lid.x;
     let enabled = i < parameters.count;
     var p = vec2<f32>(0.0);
     if enabled { p = previous[i]; }

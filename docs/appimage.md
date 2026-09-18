@@ -1,6 +1,6 @@
 # Install Nodiform on Bazzite
 
-Nodiform 0.1.4 is an **experimental alpha** for x86_64 Linux. The AppImage gives it a self-contained application file, desktop-menu entry, and a Gear Lever update source. Experiments and recordings stay outside the application file. This packaging does not sandbox Nodiform or change its alpha status.
+Nodiform 0.1.5 is an **experimental alpha** for x86_64 Linux. The AppImage gives it a self-contained application file, desktop-menu entry, and a Gear Lever update source. Experiments and recordings stay outside the application file. This packaging does not sandbox Nodiform or change its alpha status.
 
 ## Install with Gear Lever
 
@@ -23,9 +23,11 @@ The AppImage runtime's upstream licence notice is included in [third-party/appim
 
 Open Nodiform's entry in Gear Lever to check for and apply updates. When given a choice, replace the previous application version rather than keeping both to save space. Gear Lever manages the download and desktop integration; Nodiform does not install background updates itself. Bazzite notes that Gear Lever can check for updates, while applying them remains a user action. [Bazzite guide](https://docs.bazzite.gg/Installing_and_Managing_Software/AppImage/)
 
-Version 0.1.4 uses the same update channel as earlier versions, so an existing Gear Lever installation does not need a new source configured. Older saved experiments and generator scripts remain supported. This version changes automatic birth placement and motion: new nodes start near their existing connected neighbours, repulsion is reduced from 1024 to 512, and damped momentum makes movement more fluid. The default edge strength remains 4. Rerunning an older experiment uses these new semantics.
+Version 0.1.5 uses the same update channel as earlier versions, so an existing Gear Lever installation does not need a new source configured. It removes the former 8,192-node and 250,000-edge caps and grows GPU storage with the graph. The force model and automatic birth placement from 0.1.4 are unchanged. Available memory and the GPU’s actual limits still apply; the exact solver can become very slow as node counts grow.
 
-The preview now matches its on-screen physical pixel size, including desktop scaling, and has a black background. Video output resolution remains independent. **Settings → Appearance** still chooses System, Light or Dark, remembered independently of your experiment files. Connection-based node sizing remains uncapped and starts off for projects that do not contain that setting.
+Older saved experiments and generator scripts remain supported, but their source is preserved. If an older script contains an `8192` guard or a count control with a fixed `max`, that script still restricts itself. Choose the updated example from **Experiment → Examples**, or edit its guard and control yourself. Save any current edits before loading a replacement example.
+
+The preview matches its on-screen physical pixel size, including desktop scaling, and has a black background. Video output resolution remains independent. **Settings → Appearance** still chooses System, Light or Dark, remembered independently of your experiment files. Connection-based node sizing remains uncapped and starts off for projects that do not contain that setting.
 
 The AppImage embeds this update source:
 

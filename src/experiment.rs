@@ -6,6 +6,12 @@ use std::collections::BTreeMap;
 pub type Controls = BTreeMap<String, ControlSpec>;
 const MAX_CONTROLS: usize = 64;
 const MAX_METADATA_BYTES: usize = 65_536;
+/// JavaScript numbers represent every integer exactly only within this range.
+pub(crate) const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+pub(crate) fn is_safe_integer(number: f64) -> bool {
+    number.is_finite() && number.fract() == 0.0 && number.abs() <= MAX_SAFE_INTEGER
+}
 
 struct UniqueControls(Controls);
 
@@ -121,9 +127,9 @@ fn validate_spec(name: &str, spec: &ControlSpec) -> Result<(), String> {
     if [spec.min, spec.max, spec.step]
         .into_iter()
         .flatten()
-        .any(|v| !v.is_finite() || v.abs() > 1_000_000.0)
+        .any(|v| !v.is_finite())
     {
-        return Err("numeric bounds must be finite and within ±1000000".into());
+        return Err("numeric bounds and step must be finite".into());
     }
     if spec.min.zip(spec.max).is_some_and(|(min, max)| min > max) {
         return Err("min cannot exceed max".into());
@@ -135,9 +141,9 @@ fn validate_spec(name: &str, spec: &ControlSpec) -> Result<(), String> {
         && [spec.min, spec.max, spec.step]
             .into_iter()
             .flatten()
-            .any(|v| v.fract() != 0.0)
+            .any(|v| !is_safe_integer(v))
     {
-        return Err("integer bounds and step must be whole numbers".into());
+        return Err("integer bounds and step must be whole numbers within JavaScript's exact integer range (±9007199254740991)".into());
     }
     if spec.kind == ControlKind::Select {
         if spec.options.is_empty()
@@ -160,11 +166,11 @@ pub(crate) fn validate_value(spec: &ControlSpec, value: &Value) -> Result<(), St
     match spec.kind {
         ControlKind::Integer | ControlKind::Number => {
             let number = value.as_f64().ok_or("expected a number")?;
-            if !number.is_finite() || number.abs() > 1_000_000.0 {
-                return Err("number must be finite and within ±1000000".into());
+            if !number.is_finite() {
+                return Err("number must be finite".into());
             }
-            if spec.kind == ControlKind::Integer && number.fract() != 0.0 {
-                return Err("expected a whole number".into());
+            if spec.kind == ControlKind::Integer && !is_safe_integer(number) {
+                return Err("expected a whole number within JavaScript's exact integer range (±9007199254740991)".into());
             }
             if let Some(min) = spec.min {
                 if number < min {
@@ -282,5 +288,56 @@ mod tests {
             assert!(validate_parameters(&controls, &params).is_err());
         }
         assert!(parse_controls("function build(){}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn numeric_controls_use_representation_limits_and_script_bounds() {
+        let controls = parse_controls(r#"/* @controls {
+            "count":{"type":"integer","label":"Nodes","default":2000000},
+            "bounded":{"type":"integer","label":"Bounded","default":2000000,"min":1000001,"max":9000000000,"step":2000000},
+            "scale":{"type":"number","label":"Scale","default":1e100,"min":-1e200,"max":1e200,"step":1e50},
+            "unbounded":{"type":"number","label":"Unbounded","default":1e300}
+        } */"#).unwrap();
+        for count in [
+            2_000_000_i64,
+            9_000_000_000,
+            9_007_199_254_740_991,
+            -9_007_199_254_740_991,
+        ] {
+            assert!(validate_parameters(&controls, &json!({"count":count})).is_ok());
+        }
+        assert!(validate_parameters(&controls, &json!({"bounded":9_000_000_000_u64})).is_ok());
+        assert!(validate_parameters(&controls, &json!({"bounded":9_000_000_001_u64})).is_err());
+        assert!(validate_parameters(&controls, &json!({"bounded":1_000_000})).is_err());
+        assert!(validate_parameters(&controls, &json!({"scale":1e201})).is_err());
+        assert!(validate_parameters(&controls, &json!({"unbounded":f64::MAX})).is_ok());
+        assert!(validate_parameters(&controls, &json!({"unbounded":-f64::MAX})).is_ok());
+    }
+
+    #[test]
+    fn integer_controls_reject_values_outside_javascript_exact_range() {
+        let controls = parse_controls(
+            r#"/* @controls {
+            "count":{"type":"integer","label":"Count","default":2000000}
+        } */"#,
+        )
+        .unwrap();
+        for value in [
+            json!(9_007_199_254_740_992_u64),
+            json!(9_007_199_254_740_993_u64),
+            json!(-9_007_199_254_740_992_i64),
+            json!(u64::MAX),
+            json!(2_000_000.5),
+        ] {
+            assert!(validate_parameters(&controls, &json!({"count":value})).is_err());
+        }
+        for source in [
+            r#"/* @controls {"n":{"type":"integer","label":"N","default":9007199254740992}} */"#,
+            r#"/* @controls {"n":{"type":"integer","label":"N","default":2,"max":9007199254740992}} */"#,
+            r#"/* @controls {"n":{"type":"integer","label":"N","default":2,"min":-9007199254740992}} */"#,
+            r#"/* @controls {"n":{"type":"integer","label":"N","default":2,"step":9007199254740992}} */"#,
+        ] {
+            assert!(parse_controls(source).is_err(), "{source}");
+        }
     }
 }

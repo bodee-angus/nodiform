@@ -87,9 +87,9 @@ function build(graph) {
 }
 ```
 
-`graph.palette(count)` accepts an integer from 0 to 8192; zero returns an empty array. It uses Oklab/OKLCH with sRGB gamut handling to select vibrant colours. The same request returns the same hex codes, and increasing the count preserves the earlier colours. Returned arrays are independent copies. It does not consume `graph.random()` or require a network connection. **Insert → Colour palette** inserts the call in either editor API.
+`graph.palette(count)` accepts a nonnegative safe integer; zero returns an empty array. The former 8,192-colour ceiling is removed, although the requested array must still fit memory and JavaScript’s array representation. It uses Oklab/OKLCH with sRGB gamut handling to select vibrant colours. The same request returns the same hex codes, and increasing the count preserves the earlier colours. Returned arrays are independent copies. It does not consume `graph.random()` or require a network connection. **Insert → Colour palette** inserts the call in either editor API.
 
-Small palettes maximise separation among a fixed set of vivid candidates. Beyond 128 colours the helper uses deterministic sampling to keep the cost bounded. Hex values remain unique, but increasingly large palettes cannot remain easy to distinguish. This is not a colour-vision-deficiency guarantee.
+Small palettes maximise separation among a fixed set of vivid candidates. Beyond 128 colours the helper uses deterministic sampling, with a bounded number of attempts per colour. The colour prefix supported by earlier versions is preserved. Larger palettes can repeat hex values once candidate retries are exhausted; finite sRGB colour space cannot provide arbitrarily many unique colours. Increasingly large palettes also become difficult to distinguish. This is not a colour-vision-deficiency guarantee.
 
 When `gradient: true`, the edge blends from its source node's current colour to its target's current colour in linear-light RGB. The `color` option's **alpha** controls edge opacity, multiplied by endpoint alpha; its RGB is ignored. `#ffffffcc` means 80% edge opacity, and `#ffffff` means fully opaque. Omitting `color` keeps the default edge opacity of 60%. Node colour updates affect gradients automatically in both preview and video. Set `gradient: false` to return to an ordinary solid edge.
 
@@ -101,7 +101,7 @@ Put an `@controls` block at the very beginning of the script when particular val
 /* @controls {
   "count": {
     "type": "integer", "label": "Nodes",
-    "default": 500, "min": 1, "max": 500
+    "default": 500, "min": 1
   },
   "interval": {
     "type": "integer", "label": "Ticks between births",
@@ -132,6 +132,8 @@ Each property name becomes a key on `p`. The required fields are `type`, `label`
 Only the leading comment declares controls; whitespace before it is allowed. A script may expose up to 64 controls, with at most 64 KiB of metadata. Invalid metadata or input values produce an error rather than being silently replaced.
 
 Defaults fill missing input keys when compiling. Existing values take precedence, and undeclared keys remain available to the script. Merely opening **Inputs** does not replace stored values with defaults. **Advanced · Input JSON** edits the same input object, including properties without a control. A script without `@controls` can still read values from that object.
+
+A count control can omit `max`, as above. A `max` declared by your script remains a constraint on that input; removing the application’s graph caps does not override it.
 
 The seed, playback timing, recording settings, and appearance options belong in the application's **Settings** window. Experiment-specific inputs belong to the script.
 
@@ -172,6 +174,8 @@ function* generate(N, params) {
 
 ## Included experiments and limits
 
+**Connect to the previous half** creates numbered nodes in order. Node `n` connects to the most recent `floor(n / 2)` predecessors: `1` has no edges at birth, `2` connects to `1`, `3` to `2`, `4` to `3` and `2`, `5` to `4` and `3`, and `6` to `5`, `4` and `3`. The default 500 nodes create 62,500 edges. Choose it under **Experiment → Examples**, then adjust its script-defined inputs. It has no fixed node-count ceiling; available resources and the solver's cost still apply. Its source is [half-neighbourhood.js](../examples/half-neighbourhood.js).
+
 **Letter permutations** builds strings over an alphabet. With `ABC` and no repetition it creates six ordered two-letter strings and six ordered three-letter strings. `ABC` connects to the contiguous substrings `AB` and `BC`, not `AC`. Alphabet, length, repetition, and order are declared by that example's source. **Growing ring** builds a chain and closes its endpoints without prearranging a circle. **Modular residues** connects numbers by residue rules and can add explicit scaffold edges.
 
 The permutation example uses `N.palette(alphabet.length)` and assigns each node the colour of its **first letter**. `A`, `AB` and `ACB` therefore share a colour. Edges blend their endpoint colours. Alphabet characters are Unicode code points, not full grapheme clusters.
@@ -186,6 +190,12 @@ C, CA, CAB, CBA, CB
 
 This keeps starting-letter groups in alphabet order, visiting child subtrees alternately forward and backwards. Reversing a subtree puts its prefix last, which deliberately places `ACB` before `AC`. The rule generalises to other lengths and repeated letters. An edge waits until both of its nodes exist, then appears with the later node. Changing birth order preserves the final graph while changing its evolution. The layer-based `lexicographic`, `reverse` and seeded `shuffle` options remain available.
 
-The graph caps are 8,192 nodes and 250,000 edges. The worker also limits JavaScript heap memory to 64 MiB, stack memory to 512 KiB, generated event JSON to 16 MiB, and event count to 100,000. Source and parameter sizes, execution time, and instructions are bounded too. These limits interact: not every graph below the node/edge caps fits a plan.
+There is no application-selected node or edge count cap. The graph must fit the GPU’s actual buffer and dispatch limits, shader index ranges, available GPU memory, and host memory. Exact all-pairs repulsion remains O(N²), so larger graphs can be much slower even when they fit.
 
-The full plan must finish before playback. Infinite generators and functions are rejected; rules cannot inspect live GPU positions or react to solver state. Deletion, resumable checkpoints, async functions, and an interactive debugger are not part of this API. The worker isolates failures but is not a security sandbox for untrusted programs.
+The updated examples remove their former node and edge count guards. Older saved or custom scripts are not rewritten: an `8192` check, a count-control `max`, or another restriction in their source still applies. Load an updated example or edit those rules explicitly.
+
+Rule generation still creates and validates a complete finite plan before playback. Events are emitted directly to the native worker, avoiding a second full JSON plan inside JavaScript. Heap and plan budgets derive from available host memory, including the remaining memory allowance in a cgroup. There is no fixed event-count or generated-JSON ceiling. Source, input, stack and numeric representation limits remain.
+
+Long finite generation can continue while it makes progress and fits memory; use **Stop** to cancel it. The JavaScript watchdog stops code that goes five seconds without rule API progress. A separate worker watchdog stops a worker that produces no pipe activity for 60 seconds. Neither is a total duration allowance for every valid experiment.
+
+Rules cannot inspect live GPU positions or react to solver state. Deletion, resumable checkpoints, async functions, and an interactive debugger are not part of this API. The worker isolates failures but is not a security sandbox for untrusted programs.

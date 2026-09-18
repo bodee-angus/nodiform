@@ -15,6 +15,8 @@ If execution is blocked by file permissions, enable executable permission in the
 
 The AppImage contains Nodiform, its icon, examples, and documentation. It uses the host's Linux libraries and Vulkan GPU driver. Release builds use Ubuntu 24.04 as their build basis; compatibility with older Linux distributions is not promised. Actual Bazzite hardware testing remains outstanding.
 
+The AppImage runtime's upstream licence notice is included in [third-party/appimage-runtime-LICENSE.txt](third-party/appimage-runtime-LICENSE.txt). Its [corresponding source and build instructions](https://github.com/AppImage/type2-runtime/tree/dd6cebedcbddde9c82f89b011e8e1d40b6e43868) are available from AppImage. This notice applies to that third-party runtime, not to Nodiform's own source.
+
 **Preview needs no video encoder.** Recording needs an `ffmpeg` executable visible on the host application's `PATH`, with `libx264` or the selected `h264_nvenc` encoder. FFmpeg and GPU drivers are not bundled. An FFmpeg installation confined to an unrelated container will not be found by a host-launched Nodiform.
 
 ## Apply updates

@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub const MAX_NODES: usize = 8_192;
-pub const MAX_EDGES: usize = 100_000;
+// A complete 500-node graph has 124,750 edges. Keep the bounded exact solver
+// useful for dense experiments as well as sparse growth rules.
+pub const MAX_EDGES: usize = 250_000;
 pub const BIRTH_PLACEMENT_VERSION: &str = "seeded-id-jitter-v1";
 /// Domain limits keep finite user inputs within the GPU solver's numeric range.
 pub const MAX_NUMERIC_MAGNITUDE: f32 = 1_000_000.0;
@@ -407,6 +409,41 @@ mod tests {
             })
             .is_err());
         assert_eq!(graph.nodes.len(), 2);
+    }
+
+    #[test]
+    fn edge_capacity_accepts_boundary_and_rejects_next_batch_atomically() {
+        let mut graph = Graph::new(7);
+        // Parallel edges are valid: use them to exercise the exact capacity
+        // without conflating an edge limit with a particular node count.
+        graph
+            .apply(&Event::Batch {
+                nodes: vec![node("a"), node("b")],
+                edges: (0..MAX_EDGES)
+                    .map(|index| edge(&format!("e:{index}"), "a", "b"))
+                    .collect(),
+            })
+            .unwrap();
+        assert_eq!(graph.edges.len(), MAX_EDGES);
+        let error = graph
+            .apply(&Event::Batch {
+                nodes: vec![node("c")],
+                edges: vec![edge("overflow", "b", "c")],
+            })
+            .unwrap_err();
+        assert!(error.contains(&MAX_EDGES.to_string()));
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), MAX_EDGES);
+        assert!(!graph.node_indices.contains_key("c"));
+        assert!(!graph.edge_indices.contains_key("overflow"));
+        graph
+            .apply(&Event::SetEdge {
+                id: format!("e:{}", MAX_EDGES - 1),
+                color: None,
+                strength: Some(0.25),
+            })
+            .unwrap();
+        assert_eq!(graph.edges.last().unwrap().strength, 0.25);
     }
     #[test]
     fn zero_weight_edges_do_not_bind_components() {

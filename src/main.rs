@@ -1,7 +1,9 @@
 mod app;
 mod diagnostics;
 mod editor;
+mod experiment;
 mod gpu;
+mod inputs;
 mod model;
 mod recording;
 mod rules;
@@ -29,6 +31,12 @@ fn main() -> eframe::Result {
     };
     let mut wgpu_setup = eframe::egui_wgpu::WgpuSetupCreateNew::default();
     wgpu_setup.instance_descriptor.backends = eframe::wgpu::Backends::VULKAN;
+    let window_size =
+        if smoke_test.is_some() && std::env::var("NODIFORM_SMOKE_COMPACT").as_deref() == Ok("1") {
+            [1024.0, 700.0]
+        } else {
+            [1500.0, 940.0]
+        };
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
@@ -38,7 +46,7 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_app_id("nodiform")
             .with_title("Nodiform · Emergent Graph Laboratory")
-            .with_inner_size([1500.0, 940.0])
+            .with_inner_size(window_size)
             .with_min_inner_size([1024.0, 700.0]),
         ..Default::default()
     };

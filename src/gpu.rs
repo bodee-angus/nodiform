@@ -17,10 +17,7 @@ use std::sync::{mpsc, Arc};
 use bytemuck::{Pod, Zeroable};
 use eframe::wgpu::{self, util::DeviceExt};
 
-use crate::model::Graph;
-
-pub const MAX_NODES: usize = 8192;
-pub const MAX_EDGES: usize = 100_000;
+use crate::model::{Graph, MAX_EDGES, MAX_NODES};
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 #[repr(C)]
@@ -92,6 +89,9 @@ pub struct GpuGraph {
     node_count: usize,
     edge_count: usize,
     effective_dt: f32,
+    base_styles: Vec<NodeStyle>,
+    incident_degrees: Vec<u32>,
+    degree_sizing: bool,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     dimensions: (u32, u32),
@@ -101,7 +101,7 @@ impl GpuGraph {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         let positions =
             std::array::from_fn(|_| storage(&device, "node positions", MAX_NODES * 8, true));
-        let styles = storage(&device, "node styles", MAX_NODES * 32, false);
+        let styles = storage(&device, "node styles", MAX_NODES * 32, true);
         let edges = storage(&device, "edges", MAX_EDGES * 32, false);
         let offsets = storage(&device, "adjacency offsets", (MAX_NODES + 1) * 4, false);
         let neighbours = storage(&device, "adjacency entries", MAX_EDGES * 2 * 16, false);
@@ -253,6 +253,9 @@ impl GpuGraph {
             node_count: 0,
             edge_count: 0,
             effective_dt: 1.0 / 120.0,
+            base_styles: Vec::new(),
+            incident_degrees: Vec::new(),
+            degree_sizing: false,
             texture,
             view,
             dimensions,
@@ -287,7 +290,7 @@ impl GpuGraph {
             self.active = 0;
             self.reset_camera();
         }
-        let styles: Vec<NodeStyle> = graph
+        self.base_styles = graph
             .nodes
             .iter()
             .map(|node| NodeStyle {
@@ -296,10 +299,6 @@ impl GpuGraph {
                 padding: [0.0; 3],
             })
             .collect();
-        if !styles.is_empty() {
-            self.queue
-                .write_buffer(&self.styles, 0, bytemuck::cast_slice(&styles));
-        }
         let edges: Vec<GpuEdge> = graph
             .edges
             .iter()
@@ -329,6 +328,8 @@ impl GpuGraph {
         for i in 1..offsets.len() {
             offsets[i] += offsets[i - 1];
         }
+        self.incident_degrees = display_degrees(graph);
+        self.write_display_styles();
         let mut cursor = offsets.clone();
         let mut neighbours = vec![Neighbour::zeroed(); graph.edges.len() * 2];
         for edge in &graph.edges {
@@ -369,6 +370,37 @@ impl GpuGraph {
     /// Timeline ticks remain discrete events, independent of wall-clock time.
     pub fn effective_timestep(&self) -> f32 {
         self.effective_dt
+    }
+
+    /// A view option only. Keep rule radii and physics intact, update the GPU
+    /// styles immediately, and let the next render fit the displayed radii.
+    pub fn set_degree_sizing(&mut self, enabled: bool) {
+        if self.degree_sizing != enabled {
+            self.degree_sizing = enabled;
+            self.write_display_styles();
+        }
+    }
+
+    fn write_display_styles(&self) {
+        if self.base_styles.is_empty() {
+            return;
+        }
+        if !self.degree_sizing {
+            self.queue
+                .write_buffer(&self.styles, 0, bytemuck::cast_slice(&self.base_styles));
+            return;
+        }
+        let styles: Vec<NodeStyle> = self
+            .base_styles
+            .iter()
+            .zip(&self.incident_degrees)
+            .map(|(style, degree)| NodeStyle {
+                radius: display_radius(style.radius, *degree),
+                ..*style
+            })
+            .collect();
+        self.queue
+            .write_buffer(&self.styles, 0, bytemuck::cast_slice(&styles));
     }
 
     /// Advance fixed simulation ticks. Callers choose a fixed tick/frame ratio
@@ -755,6 +787,29 @@ fn linear_color(color: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+fn display_radius(base_radius: f32, degree: u32) -> f32 {
+    // Obsidian 1.13.7 global-graph square-root curve, normalised to its minimum
+    // radius of 8. Omit its upper limit of 30: Nodiform's view has no size cap.
+    // World-space radii still follow the rule's scale and the normal camera.
+    // Source release: https://github.com/obsidianmd/obsidian-releases/releases/tag/v1.13.7
+    base_radius * (3.0 * (degree as f32 + 1.0).sqrt() / 8.0).max(1.0)
+}
+
+fn display_degrees(graph: &Graph) -> Vec<u32> {
+    // As in Obsidian's global graph, repeated links in the same direction
+    // count once, while reciprocal links each count. This display convention
+    // does not alter weighted attraction or the full physical adjacency.
+    let mut connections = std::collections::HashSet::with_capacity(graph.edges.len());
+    let mut degrees = vec![0; graph.nodes.len()];
+    for edge in &graph.edges {
+        if connections.insert((edge.source, edge.target)) {
+            degrees[edge.source] += 1;
+            degrees[edge.target] += 1;
+        }
+    }
+    degrees
+}
+
 fn force_timestep(graph: &Graph) -> f32 {
     // f64 accumulation keeps large weighted degrees finite and avoids losing
     // small incident strengths while summing edges in their declared order.
@@ -773,6 +828,69 @@ fn force_timestep(graph: &Graph) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn degree_sizing_matches_uncapped_obsidian_curve_and_preserves_rule_scale() {
+        use super::display_radius;
+        for degree in 0..=6 {
+            assert_eq!(display_radius(2.0, degree), 2.0);
+        }
+        assert_eq!(display_radius(2.0, 7), 2.0 * (3.0 * 8.0_f32.sqrt() / 8.0));
+        assert_eq!(display_radius(2.0, 15), 3.0);
+        assert_eq!(display_radius(2.0, 63), 6.0);
+        assert_eq!(display_radius(2.0, 99), 7.5);
+        // Unlike Obsidian's upper limit of 30 / 8, growth continues past this.
+        assert!(display_radius(2.0, 100) > 7.5);
+        assert_eq!(display_radius(2.0, 399), 15.0);
+        assert!((display_radius(1.0, 499) - 8.385_255).abs() < 0.000_01);
+        let degrees = [6, 7, 31, 32, 99, 100, 499, 500, 250_000, 500_000];
+        for pair in degrees.windows(2) {
+            assert!(display_radius(2.0, pair[1]) > display_radius(2.0, pair[0]));
+        }
+        for degree in degrees {
+            assert_eq!(
+                display_radius(4.0, degree),
+                2.0 * display_radius(2.0, degree)
+            );
+        }
+    }
+
+    #[test]
+    fn display_degree_counts_unique_directed_connections_without_changing_edges() {
+        use crate::model::{Event, Graph};
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "op":"batch", "nodes":[{"id":"a"},{"id":"b"},{"id":"isolated"}],
+            "edges":[
+                {"id":"ab","source":"a","target":"b"},
+                {"id":"duplicate-ab","source":"a","target":"b"},
+                {"id":"ba","source":"b","target":"a","strength":0},
+                {"id":"bb","source":"b","target":"b"},
+                {"id":"duplicate-bb","source":"b","target":"b"}
+            ]
+        }))
+        .unwrap();
+        let mut graph = Graph::new(0);
+        graph.apply(&event).unwrap();
+        assert_eq!(super::display_degrees(&graph), vec![2, 4, 0]);
+        assert_eq!(graph.edges.len(), 5);
+        assert_eq!(
+            graph.edges.iter().map(|edge| edge.strength).sum::<f32>(),
+            4.0
+        );
+        graph
+            .apply(&Event::Batch {
+                nodes: vec![],
+                edges: vec![crate::model::EdgeSpec {
+                    id: "to-isolated".into(),
+                    source: "a".into(),
+                    target: "isolated".into(),
+                    color: "#ffffff".into(),
+                    strength: 0.0,
+                }],
+            })
+            .unwrap();
+        assert_eq!(super::display_degrees(&graph), vec![3, 4, 1]);
+    }
+
     #[test]
     fn timestep_bounds_incident_stiffness_and_zero_degree() {
         use crate::model::{Edge, Graph, Node};
@@ -996,6 +1114,222 @@ mod tests {
             assert!(positions[0][0] <= 1e-7 && positions[1][0] >= -1e-7);
             assert!(positions.iter().flatten().all(|value| value.is_finite()));
         }
+
+        // Connection sizing changes GPU styles and camera bounds, but the same
+        // solver inputs must produce bit-identical positions with either view.
+        let mut styled = Graph::new(42);
+        styled
+            .apply(&Event::Batch {
+                nodes: vec![node("a", [-3.0, 0.0]), node("b", [3.0, 0.0])],
+                edges: vec![
+                    EdgeSpec {
+                        id: "ab".into(),
+                        source: "a".into(),
+                        target: "b".into(),
+                        color: "#60708b".into(),
+                        strength: 1.0,
+                    },
+                    EdgeSpec {
+                        id: "parallel".into(),
+                        source: "a".into(),
+                        target: "b".into(),
+                        color: "#60708b".into(),
+                        strength: 0.0,
+                    },
+                    EdgeSpec {
+                        id: "self".into(),
+                        source: "b".into(),
+                        target: "b".into(),
+                        color: "#60708b".into(),
+                        strength: 0.0,
+                    },
+                ],
+            })
+            .unwrap();
+        for index in 0..6 {
+            let id = format!("spoke:{index}");
+            styled
+                .apply(&Event::Batch {
+                    nodes: vec![node(&id, [index as f32, -5.0])],
+                    edges: ["a", "b"]
+                        .into_iter()
+                        .map(|source| EdgeSpec {
+                            id: format!("{source}:{id}"),
+                            source: source.into(),
+                            target: id.clone(),
+                            color: "#60708b".into(),
+                            strength: 1.0,
+                        })
+                        .collect(),
+                })
+                .unwrap();
+        }
+        gpu.sync_graph(&styled, true);
+        assert_eq!(gpu.incident_degrees, vec![7, 9, 2, 2, 2, 2, 2, 2]);
+        assert_eq!(read_style_radii(&gpu), vec![1.0; 8]);
+        gpu.step(8);
+        let baseline_positions = gpu.read_positions(8).unwrap();
+        let baseline_dt = gpu.effective_timestep();
+        gpu.set_degree_sizing(true);
+        assert_eq!(baseline_positions, gpu.read_positions(8).unwrap());
+        assert_eq!(baseline_dt, gpu.effective_timestep());
+        assert_eq!(
+            read_style_radii(&gpu),
+            vec![
+                display_radius(1.0, 7),
+                display_radius(1.0, 9),
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+            ]
+        );
+        assert!(styled.nodes.iter().all(|node| node.radius == 1.0));
+        gpu.sync_graph(&styled, true);
+        gpu.step(8);
+        assert_eq!(baseline_positions, gpu.read_positions(8).unwrap());
+        gpu.set_degree_sizing(false);
+        assert_eq!(read_style_radii(&gpu), vec![1.0; 8]);
+        gpu.set_degree_sizing(true);
+        styled
+            .apply(&Event::Batch {
+                nodes: vec![node("c", [0.0, 7.0])],
+                edges: vec![EdgeSpec {
+                    id: "ac".into(),
+                    source: "a".into(),
+                    target: "c".into(),
+                    color: "#60708b".into(),
+                    strength: 1.0,
+                }],
+            })
+            .unwrap();
+        gpu.sync_graph(&styled, false);
+        assert_eq!(baseline_positions, gpu.read_positions(8).unwrap());
+        assert_eq!(gpu.incident_degrees, vec![8, 9, 2, 2, 2, 2, 2, 2, 1]);
+        assert_eq!(
+            read_style_radii(&gpu),
+            vec![
+                display_radius(1.0, 8),
+                display_radius(1.0, 9),
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+            ]
+        );
+        gpu.set_degree_sizing(false);
+
+        // The complete-graph growth example exceeds the old 100,000-edge cap.
+        // Exercise both ping-pong births and a dense upload on the real backend,
+        // then verify actual dynamics and pixels without hardware speed claims.
+        let mut dense = Graph::new(42);
+        gpu.sync_graph(&dense, true);
+        for number in 1..=500 {
+            let id = number.to_string();
+            dense
+                .apply(&Event::Batch {
+                    nodes: vec![NodeSpec {
+                        id: id.clone(),
+                        label: None,
+                        color: "#89b4fa".into(),
+                        radius: 0.3,
+                        position: None,
+                    }],
+                    edges: (1..number)
+                        .map(|previous| EdgeSpec {
+                            id: format!("{number}:{previous}"),
+                            source: id.clone(),
+                            target: previous.to_string(),
+                            color: "#60708b18".into(),
+                            strength: 1.0,
+                        })
+                        .collect(),
+                })
+                .unwrap();
+            // Testing representative growth boundaries keeps software Vulkan
+            // economical while retaining an append after an odd solver tick.
+            if matches!(number, 16 | 499 | 500) {
+                gpu.sync_graph(&dense, false);
+                gpu.step(1);
+            }
+        }
+        assert_eq!(dense.nodes.len(), 500);
+        assert_eq!(dense.edges.len(), 124_750);
+        let mut degrees = vec![0; dense.nodes.len()];
+        let mut pairs = std::collections::HashSet::with_capacity(dense.edges.len());
+        for edge in &dense.edges {
+            assert!(edge.source > edge.target);
+            assert!(pairs.insert((edge.source, edge.target)));
+            degrees[edge.source] += 1;
+            degrees[edge.target] += 1;
+        }
+        assert!(degrees.iter().all(|degree| *degree == 499));
+        assert_eq!(gpu.effective_timestep(), (0.5_f64 / 499.0) as f32);
+        gpu.step(32);
+        let positions = gpu.read_positions(500).unwrap();
+        assert!(positions.iter().flatten().all(|value| value.is_finite()));
+        assert!(positions
+            .iter()
+            .zip(&dense.nodes)
+            .any(|(position, node)| *position != node.position));
+        gpu.render(320, 180);
+        let frame = gpu.read_rgba().unwrap();
+        assert_eq!(frame.len(), 320 * 180 * 4);
+        let pixels = frame.as_chunks::<4>().0;
+        assert!(pixels.iter().all(|pixel| pixel[3] == 255));
+        assert!(pixels.iter().any(|pixel| pixel != &pixels[0]));
+        let camera = read_camera(&gpu);
+        for (position, node) in positions.iter().zip(&dense.nodes) {
+            assert!((position[0] - camera[0]).abs() + node.radius <= camera[2]);
+            assert!((position[1] - camera[1]).abs() + node.radius <= camera[3]);
+        }
+        gpu.set_degree_sizing(true);
+        gpu.render(320, 180);
+        let displayed_radius = display_radius(0.3, 499);
+        assert!(read_style_radii(&gpu)
+            .iter()
+            .all(|radius| *radius == displayed_radius));
+        let camera = read_camera(&gpu);
+        for position in &positions {
+            assert!((position[0] - camera[0]).abs() + displayed_radius <= camera[2]);
+            assert!((position[1] - camera[1]).abs() + displayed_radius <= camera[3]);
+        }
+        assert_eq!(positions, gpu.read_positions(500).unwrap());
+        gpu.set_degree_sizing(false);
+        assert!(read_style_radii(&gpu).iter().all(|radius| *radius == 0.3));
+        eprintln!(
+            "Dense graph validation: 500 nodes, 124750 edges, finite dynamics and rendered frame"
+        );
+    }
+
+    fn read_style_radii(gpu: &super::GpuGraph) -> Vec<f32> {
+        use eframe::wgpu;
+        let size = (gpu.node_count * std::mem::size_of::<super::NodeStyle>()) as u64;
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test style readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("test style transfer"),
+            });
+        encoder.copy_buffer_to_buffer(&gpu.styles, 0, &buffer, 0, size);
+        gpu.queue.submit(Some(encoder.finish()));
+        gpu.map_readback(&buffer)
+            .unwrap()
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .map(|style| f32::from_le_bytes(style[16..20].try_into().unwrap()))
+            .collect()
     }
 
     fn read_camera(gpu: &super::GpuGraph) -> [f32; 4] {

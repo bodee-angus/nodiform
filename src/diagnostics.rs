@@ -1,7 +1,12 @@
 use std::{
+    fs::OpenOptions,
+    io::{self, BufWriter, Write},
+    path::PathBuf,
     sync::{mpsc, Arc, Mutex},
     time::Duration,
 };
+
+use eframe::egui;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LaunchMode {
@@ -37,6 +42,9 @@ pub struct SmokeTest {
 
 pub struct SmokeProbe {
     outcome: Outcome,
+    screenshot_path: Option<PathBuf>,
+    screenshot_requested: bool,
+    screenshot_saved: bool,
     pub frames: u32,
     pub completed: bool,
 }
@@ -61,6 +69,9 @@ impl SmokeTest {
             },
             SmokeProbe {
                 outcome,
+                screenshot_path: std::env::var_os("NODIFORM_SMOKE_SCREENSHOT").map(PathBuf::from),
+                screenshot_requested: false,
+                screenshot_saved: false,
                 frames: 0,
                 completed: false,
             },
@@ -96,9 +107,58 @@ impl Drop for SmokeTest {
 impl SmokeProbe {
     pub fn ready(&mut self, tick: u64, nodes: usize, edges: usize) -> bool {
         self.frames += 1;
-        // The unchanged ABC example first creates edges at tick 72. Waiting to
-        // tick 96 tests attraction as well as node generation and repulsion.
+        // Give both attraction and repulsion time to move generated nodes,
+        // independently of the particular example selected for the test.
         self.frames >= 6 && tick >= 96 && nodes >= 4 && edges >= 2
+    }
+
+    /// Capture the actual native viewport after the app has verified its graph.
+    /// This is opt-in for smoke tests only and never replaces an existing file.
+    /// The caller must keep updating the window while this returns `Ok(false)`.
+    pub fn capture(&mut self, ctx: &egui::Context) -> Result<bool, String> {
+        let Some(path) = &self.screenshot_path else {
+            return Ok(true);
+        };
+        if self.screenshot_saved {
+            return Ok(true);
+        }
+        if !path.is_absolute() {
+            return Err("NODIFORM_SMOKE_SCREENSHOT must be an absolute PPM file path.".into());
+        }
+
+        if !self.screenshot_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            self.screenshot_requested = true;
+        } else if let Some(image) = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot {
+                    viewport_id, image, ..
+                } if *viewport_id == egui::ViewportId::ROOT => Some(image.clone()),
+                _ => None,
+            })
+        }) {
+            validate_image(&image).map_err(|error| format!("Invalid UI screenshot: {error}"))?;
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|error| {
+                    format!("Cannot create UI screenshot {}: {error}", path.display())
+                })?;
+            write_ppm(BufWriter::new(file), &image).map_err(|error| {
+                format!("Cannot write UI screenshot {}: {error}", path.display())
+            })?;
+            self.screenshot_saved = true;
+            println!(
+                "Saved native UI screenshot: {} ({} × {} pixels)",
+                path.display(),
+                image.size[0],
+                image.size[1]
+            );
+            return Ok(true);
+        }
+        ctx.request_repaint();
+        Ok(false)
     }
 
     pub fn complete(&mut self, result: Result<String, String>) {
@@ -107,6 +167,27 @@ impl SmokeProbe {
             self.completed = true;
         }
     }
+}
+
+fn validate_image(image: &egui::ColorImage) -> io::Result<()> {
+    let [width, height] = image.size;
+    if width == 0 || height == 0 || width.checked_mul(height) != Some(image.pixels.len()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pixel count does not match nonzero image dimensions",
+        ));
+    }
+    Ok(())
+}
+
+/// P6 PPM preserves all screenshot pixels without adding an image dependency.
+fn write_ppm(mut output: impl Write, image: &egui::ColorImage) -> io::Result<()> {
+    validate_image(image)?;
+    write!(output, "P6\n{} {}\n255\n", image.size[0], image.size[1])?;
+    for pixel in &image.pixels {
+        output.write_all(&pixel.to_srgba_unmultiplied()[..3])?;
+    }
+    output.flush()
 }
 
 #[cfg(test)]
@@ -152,5 +233,37 @@ mod tests {
             test.outcome.lock().unwrap().as_ref(),
             Some(&Err("first failure".into()))
         );
+    }
+
+    #[test]
+    fn screenshot_preserves_dimensions_and_rgb_pixel_order() {
+        let image = egui::ColorImage {
+            size: [2, 2],
+            pixels: vec![
+                egui::Color32::RED,
+                egui::Color32::GREEN,
+                egui::Color32::BLUE,
+                egui::Color32::WHITE,
+            ],
+        };
+        let mut output = Vec::new();
+        write_ppm(&mut output, &image).unwrap();
+        let mut expected = b"P6\n2 2\n255\n".to_vec();
+        expected.extend([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn screenshot_rejects_invalid_dimensions_before_writing() {
+        let image = egui::ColorImage {
+            size: [2, 2],
+            pixels: vec![egui::Color32::RED],
+        };
+        let mut output = Vec::new();
+        assert_eq!(
+            write_ppm(&mut output, &image).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(output.is_empty());
     }
 }

@@ -1,3 +1,10 @@
+/* @controls {
+  "count": {"type":"integer","label":"Nodes","default":100,"min":1,"max":8192},
+  "moduli": {"type":"json","label":"Moduli","default":[3,5,7]},
+  "ticksPerNode": {"type":"integer","label":"Ticks between births","default":18,"min":0,"max":1000000},
+  "finalTicks": {"type":"integer","label":"Final settling ticks","default":600,"min":0,"max":1000000},
+  "scaffoldStrength": {"type":"number","label":"Scaffold strength","default":0.15,"min":0,"max":100,"step":0.05}
+} */
 // Connect integers that share a residue, then add chain edges as an explicit scaffold.
 // Parameters: count, moduli, ticksPerNode, finalTicks, scaffoldStrength.
 // Scaffold edges are real, visible forces, never hidden gravity.

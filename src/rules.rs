@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-pub const RULE_API_VERSION: &str = "nodiform-rules-v1";
+pub const RULE_API_VERSION: &str = "nodiform-rules-v2";
 pub const MAX_EVENTS: usize = 100_000;
 const MAX_SOURCE_BYTES: usize = 1_048_576;
 const MAX_PARAMETER_BYTES: usize = 262_144;
@@ -19,12 +19,14 @@ const MAX_EVENT_JSON_BYTES: usize = 16_777_216;
 const MAX_RESPONSE_BYTES: usize = 67_108_864;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Compile ordinary JavaScript defining function* generate(N, params).
+/// Compile JavaScript defining build(graph, p) or the legacy function* generate(N, params).
 /// No filesystem, network, process, clock, unseeded randomness, or module loader is exposed.
 pub fn compile_source(source: &str, parameters: Value, seed: u32) -> Result<Plan, String> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err("Rule source exceeds 1 MiB".into());
     }
+    let controls = crate::experiment::parse_controls(source)?;
+    let parameters = crate::experiment::merge_defaults(&controls, &parameters)?;
     let parameters_json = serde_json::to_string(&parameters).map_err(|error| error.to_string())?;
     if parameters_json.len() > MAX_PARAMETER_BYTES {
         return Err("Rule parameters exceed 256 KiB".into());
@@ -89,7 +91,7 @@ pub fn compile_source(source: &str, parameters: Value, seed: u32) -> Result<Plan
 }
 
 // User code executes in a separate Function scope and cannot access the runner's counters.
-// Each yielded object is serialised immediately, so later mutations cannot rewrite past events.
+// Yields and builder operations are snapshotted so later mutation cannot rewrite history.
 const RUNNER: &str = r#"
 (() => {
     'use strict';
@@ -106,6 +108,12 @@ const RUNNER: &str = r#"
     const freeze = Object.freeze;
     const define = Object.defineProperty;
     const ErrorType = Error;
+    const stringifyCopy = value => JSON.parse(stringify(value, (_key, value) => {
+        if (typeof value === 'number' && !finite(value)) {
+            throw new ErrorType('Events cannot contain NaN or Infinity');
+        }
+        return value;
+    }));
     const imul = Math.imul;
     // QuickJS's bare context has no host IO. Also remove its clock and default random source.
     for (const name of ['Date', 'performance', 'crypto', 'process', 'require', 'fetch',
@@ -134,23 +142,11 @@ const RUNNER: &str = r#"
             return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
         }
     });
-    const factory = new Function('N', 'params', '"use strict";\n' + source +
-        '\n;if (typeof generate !== "function") throw new Error("Define function* generate(N, params)");\nreturn generate(N, params);');
-    const iterator = factory(N, parameters);
-    if (!iterator || typeof iterator.next !== 'function') {
-        throw new ErrorType('generate must return a synchronous generator');
-    }
     const encoded = [];
     let bytes = 2;
-    for (let count = 0; ; count++) {
-        const step = iterator.next();
-        if (step && typeof step.then === 'function') {
-            throw new ErrorType('Async generators are not supported; use function* generate');
-        }
-        if (!step || typeof step !== 'object') throw new ErrorType('Invalid iterator result');
-        if (step.done) break;
-        if (count >= 100000) throw new ErrorType('At most 100000 events are allowed');
-        const event = stringify(step.value, (_key, value) => {
+    function emit(value) {
+        if (encoded.length >= 100000) throw new ErrorType('At most 100000 events are allowed');
+        const event = stringify(value, (_key, value) => {
             if (typeof value === 'number' && !finite(value)) {
                 throw new ErrorType('Events cannot contain NaN or Infinity');
             }
@@ -160,6 +156,81 @@ const RUNNER: &str = r#"
         bytes += event.length + 1;
         if (bytes > 16777216) throw new ErrorType('Generated event JSON exceeds 16 MiB');
         push(encoded, event);
+    }
+    function id(value) {
+        if (typeof value === 'string') return value;
+        if (typeof value === 'number' && finite(value)) return String(value);
+        throw new ErrorType('Node and edge IDs must be strings or finite numbers');
+    }
+    let nodes = [], edges = [];
+    const known = new Set();
+    function flush() {
+        if (nodes.length || edges.length) {
+            emit(N.batch(nodes, edges));
+            nodes = [];
+            edges = [];
+        }
+    }
+    const graph = freeze({
+        add(value, options = {}) {
+            const key = id(value);
+            if (known.has(key)) throw new ErrorType(`Duplicate node ID '${key}'`);
+            if (known.size >= 8192) throw new ErrorType('At most 8192 nodes are allowed');
+            push(nodes, stringifyCopy(N.node(key, options)));
+            known.add(key);
+            return key;
+        },
+        ids() { return Array.from(known); },
+        others(value) {
+            const key = id(value);
+            return Array.from(known).filter(other => other !== key);
+        },
+        connect(from, targets, options = {}) {
+            const source = id(from);
+            const values = Array.isArray(targets) ? targets : [targets];
+            if (options.id !== undefined && values.length > 1) {
+                throw new ErrorType('A custom edge ID can connect only one target');
+            }
+            const snapshot = stringifyCopy(options);
+            const added = [];
+            for (const value of values) {
+                const edge = N.edge(source, id(value), snapshot);
+                edge.id = id(edge.id);
+                push(edges, edge);
+                push(added, edge.id);
+            }
+            return added;
+        },
+        wait(ticks) { flush(); emit(N.wait(ticks)); },
+        setNode(value, options = {}) { flush(); emit(N.setNode(id(value), options)); },
+        setEdge(value, options = {}) { flush(); emit(N.setEdge(id(value), options)); },
+        random: N.random
+    });
+    const factory = new Function('N', 'params', 'graph', '"use strict";\n' + source +
+        '\n;if (typeof build === "function" && typeof generate === "function") throw new Error("Define build or generate, not both");' +
+        '\nif (typeof build === "function") return {builder:true,value:build(graph,params)};' +
+        '\nif (typeof generate === "function") return {builder:false,value:generate(N,params)};' +
+        '\nthrow new Error("Define function build(graph, p), or function* generate(N, params)");');
+    const result = factory(N, parameters, graph);
+    if (result.builder) {
+        if (result.value && (typeof result.value.then === 'function' || typeof result.value.next === 'function')) {
+            throw new ErrorType('build must be an ordinary synchronous function');
+        }
+        flush();
+    } else {
+        const iterator = result.value;
+        if (!iterator || typeof iterator.next !== 'function') {
+            throw new ErrorType('generate must return a synchronous generator');
+        }
+        for (;;) {
+            const step = iterator.next();
+            if (step && typeof step.then === 'function') {
+                throw new ErrorType('Async generators are not supported; use function* generate');
+            }
+            if (!step || typeof step !== 'object') throw new ErrorType('Invalid iterator result');
+            if (step.done) break;
+            emit(step.value);
+        }
     }
     return '[' + join(encoded, ',') + ']';
 })()
@@ -320,6 +391,155 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn complete_growth_connects_each_birth_to_all_previous_nodes() {
+        let plan = compile_source(
+            include_str!("../examples/complete-growth.js"),
+            json!({}),
+            42,
+        )
+        .unwrap();
+        assert_eq!(
+            (plan.node_count, plan.edge_count, plan.total_ticks),
+            (500, 124_750, 3_000)
+        );
+        assert_eq!(plan.events.len(), 1_000);
+        for (index, birth) in plan.events.as_chunks::<2>().0.iter().enumerate() {
+            let Event::Batch { nodes, edges } = &birth[0] else {
+                panic!("expected birth batch");
+            };
+            let id = (index + 1).to_string();
+            assert_eq!(nodes.len(), 1);
+            assert_eq!(nodes[0].id, id);
+            assert_eq!(edges.len(), index);
+            for (target, edge) in edges.iter().enumerate() {
+                assert_eq!(edge.source, id);
+                assert_eq!(edge.target, (target + 1).to_string());
+                assert_ne!(edge.source, edge.target);
+                assert_eq!(edge.strength, 1.0);
+            }
+            assert_eq!(birth[1], Event::Wait { ticks: 6 });
+        }
+        // The worker result is larger than the compact JS event stream because serde
+        // materialises defaults. It must still fit the independently enforced IPC cap.
+        assert!(serde_json::to_vec(&plan).unwrap().len() < MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn build_without_controls_is_a_complete_custom_experiment() {
+        let plan = compile_source(include_str!("../examples/starter.js"), json!({}), 42).unwrap();
+        assert_eq!(
+            (plan.node_count, plan.edge_count, plan.total_ticks),
+            (8, 7, 192)
+        );
+        assert!(
+            crate::experiment::parse_controls(include_str!("../examples/starter.js"))
+                .unwrap()
+                .is_empty()
+        );
+        let arbitrary = "function build(graph, p) { for(const id of p.names) graph.add(id); graph.connect(p.names[2], graph.ids().slice(0,2)); graph.wait(99); }";
+        let plan = compile_source(arbitrary, json!({"names":["gamma","alpha","beta"]}), 1).unwrap();
+        let Event::Batch { nodes, edges } = &plan.events[0] else {
+            panic!();
+        };
+        assert_eq!(
+            nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            ["gamma", "alpha", "beta"]
+        );
+        assert_eq!(
+            edges.iter().map(|e| e.target.as_str()).collect::<Vec<_>>(),
+            ["gamma", "alpha"]
+        );
+        assert_eq!(plan.total_ticks, 99);
+    }
+
+    #[test]
+    fn build_styles_edits_numeric_ids_and_snapshots() {
+        let source = r#"function build(graph) {
+            const opts = {color:'#ff0000',position:[1,2]};
+            graph.add(1,opts); opts.color='#0000ff'; opts.position[0]=999;
+            graph.add('2',opts);
+            const edges = graph.connect(2, graph.others(2), {color:'#12345678',strength:0.3});
+            if (graph.ids().join(',') !== '1,2') throw new Error('order');
+            graph.wait(5);
+            graph.setEdge(edges[0], {strength:0.5,color:'#ffffff'});
+            graph.setNode(2,{color:'#00ff00',radius:2});
+        }"#;
+        let plan = compile_source(source, json!({}), 1).unwrap();
+        let Event::Batch { nodes, edges } = &plan.events[0] else {
+            panic!();
+        };
+        assert_eq!(nodes[0].color, "#ff0000");
+        assert_eq!(nodes[0].position, Some([1.0, 2.0]));
+        assert_eq!(edges[0].color, "#12345678");
+        assert_eq!(edges[0].strength, 0.3);
+        let mut graph = Graph::new(1);
+        for event in &plan.events {
+            graph.apply(event).unwrap();
+        }
+        assert_eq!(graph.nodes[0].label, "1");
+        assert_eq!(graph.nodes[1].radius, 2.0);
+        assert_eq!(graph.edges[0].strength, 0.5);
+    }
+
+    #[test]
+    fn build_defaults_are_local_to_source_and_invalid_controls_block_execution() {
+        let source = r#"/* @controls {"twigs":{"type":"integer","label":"Twigs","default":3,"min":1,"max":9}} */
+        function build(graph,p) { for(let i=0;i<p.twigs;i++) graph.add(i); }"#;
+        assert_eq!(compile_source(source, json!({}), 1).unwrap().node_count, 3);
+        assert_eq!(
+            compile_source(source, json!({"twigs":5}), 1)
+                .unwrap()
+                .node_count,
+            5
+        );
+        assert!(compile_source(source, json!({"twigs":-1}), 1)
+            .unwrap_err()
+            .contains("twigs"));
+        assert!(compile_source(
+            "/* @controls { */ function build(graph) { graph.add('a'); }",
+            json!({}),
+            1
+        )
+        .unwrap_err()
+        .contains("@controls"));
+        assert_eq!(
+            compile_source("function build(graph) {graph.add('a');}", json!({}), 1)
+                .unwrap()
+                .node_count,
+            1
+        );
+    }
+
+    #[test]
+    fn declared_defaults_apply_to_generator_scripts_too() {
+        let source = r#"/* @controls {"twigs":{"type":"integer","label":"Twigs","default":3,"min":1,"max":9}} */
+        function* generate(N,p) { for(let i=0;i<p.twigs;i++) yield N.batch([N.node(String(i))]); }"#;
+        assert_eq!(compile_source(source, json!({}), 1).unwrap().node_count, 3);
+        assert_eq!(
+            compile_source(source, json!({"twigs":5}), 1)
+                .unwrap()
+                .node_count,
+            5
+        );
+    }
+
+    #[test]
+    fn build_rejects_ambiguous_ids_nonfinite_data_and_async_work() {
+        for source in [
+            "function build(g) { g.add(1); g.add('1'); }",
+            "function build(g) { g.add({}); }",
+            "function build(g) { g.add(Infinity); }",
+            "function build(g) { g.add(1,{radius:NaN}); }",
+            "function build(g) { g.add(1); g.add(2); g.connect(1,[1,2],{id:'same'}); }",
+            "async function build(g) { g.add(1); }",
+            "function* build(g) { g.add(1); }",
+            "function build() {} function* generate() {}",
+        ] {
+            assert!(compile_source(source, json!({}), 1).is_err(), "{source}");
+        }
+    }
+
+    #[test]
     fn abc_has_correct_topology_and_insertion_order() {
         let plan = compile_source(
             include_str!("../examples/abc-permutations.js"),
@@ -360,7 +580,7 @@ mod tests {
     #[test]
     fn parameters_control_real_rule_code() {
         let plan = compile_source(include_str!("../examples/abc-permutations.js"),
-            json!({"alphabet": "AB", "maxLength": 2, "repeatLetters": true, "ticksPerNode": 7, "finalTicks": 0}), 1).unwrap();
+            json!({"alphabet": "AB", "maxLength": 2, "repetitions": true, "ticksPerNode": 7, "finalTicks": 0}), 1).unwrap();
         assert_eq!(plan.node_count, 6);
         assert_eq!(plan.edge_count, 6);
         assert_eq!(plan.total_ticks, 42);
@@ -376,8 +596,11 @@ mod tests {
             42,
         )
         .unwrap();
+        // Saved v0.1.1 projects carry source without a controls header. They keep
+        // their own defaults and alias precedence; no metadata means no injection.
+        let legacy_source = source.split_once("*/").unwrap().1;
         let legacy = compile_source(
-            source,
+            legacy_source,
             json!({"alphabet": "AB", "maxLength": 2,
             "repeatLetters": true, "reverse": true}),
             42,

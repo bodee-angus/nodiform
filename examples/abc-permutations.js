@@ -1,10 +1,18 @@
+/* @controls {
+  "alphabet": {"type":"text","label":"Alphabet","default":"ABC"},
+  "maxLength": {"type":"integer","label":"Maximum length","default":3,"min":1,"max":10},
+  "repetitions": {"type":"boolean","label":"Repeat letters","default":false},
+  "order": {"type":"select","label":"Birth order","default":"lexicographic","options":["lexicographic","reverse","shuffle"]},
+  "ticksPerNode": {"type":"integer","label":"Ticks between births","default":24,"min":0,"max":1000000},
+  "finalTicks": {"type":"integer","label":"Final settling ticks","default":0,"min":0,"max":1000000}
+} */
 // ABC permutations, without repeated letters by default.
 // Parameters: alphabet, maxLength, repetitions, order, ticksPerNode, finalTicks.
 // order: "lexicographic", "reverse", or "shuffle" (uses seeded N.random()).
-// Legacy repeatLetters and reverse parameters remain supported.
+// Metadata-free legacy scripts also support repeatLetters and reverse aliases.
 function* generate(N, params) {
     const alphabet = Array.from(params.alphabet ?? "ABC");
-    const maxLength = params.maxLength ?? alphabet.length;
+    const maxLength = params.maxLength ?? 3;
     const repeat = params.repetitions ?? params.repeatLetters ?? false;
     const order = params.order ?? (params.reverse ? "reverse" : "lexicographic");
     const ticks = params.ticksPerNode ?? 24;

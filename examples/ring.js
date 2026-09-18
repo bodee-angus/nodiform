@@ -1,3 +1,8 @@
+/* @controls {
+  "count": {"type":"integer","label":"Nodes","default":80,"min":1,"max":8192},
+  "ticksPerNode": {"type":"integer","label":"Ticks between births","default":12,"min":0,"max":1000000},
+  "finalTicks": {"type":"integer","label":"Final settling ticks","default":0,"min":0,"max":1000000}
+} */
 // A growing chain closes into a ring. Observe how local insertions reshape the whole graph.
 // Parameters: count (default 80), ticksPerNode (12), finalTicks (0).
 // Birth positions use the run's seeded ID jitter, not a prearranged circle.

@@ -17,8 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MINT: egui::Color32 = egui::Color32::from_rgb(121, 223, 199);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(142, 164, 171);
+mod ui;
+
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 112, 245);
+const MUTED: egui::Color32 = egui::Color32::from_rgb(106, 116, 135);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Project {
@@ -29,14 +31,16 @@ struct Project {
     ticks_per_frame: u32,
     tail_ticks: u32,
     recording: RecordingConfig,
+    #[serde(default)]
+    size_by_connections: bool,
 }
 
 impl Default for Project {
     fn default() -> Self {
         Self {
             schema: 1,
-            source: include_str!("../examples/abc-permutations.js").into(),
-            parameters: json!({"alphabet":"ABC", "maxLength":3, "repetitions":false, "order":"lexicographic", "ticksPerNode":24, "finalTicks":0}),
+            source: include_str!("../examples/starter.js").into(),
+            parameters: json!({}),
             seed: 42,
             ticks_per_frame: 4,
             tail_ticks: 240,
@@ -46,6 +50,7 @@ impl Default for Project {
                 fps: 60,
                 codec: "libx264".into(),
             },
+            size_by_connections: false,
         }
     }
 }
@@ -55,6 +60,12 @@ enum Intent {
     Validate,
     Preview,
     Record,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EditorTab {
+    Rules,
+    Inputs,
 }
 
 pub struct NodiformApp {
@@ -86,24 +97,15 @@ pub struct NodiformApp {
     inspected_position: Option<[f32; 2]>,
     confirm_example: Option<&'static str>,
     smoke_probe: Option<SmokeProbe>,
+    editor_tab: EditorTab,
+    show_settings: bool,
+    show_inspector: bool,
+    smoke_frame_checked: bool,
 }
 
 impl NodiformApp {
     pub fn new(cc: &eframe::CreationContext<'_>, smoke_probe: Option<SmokeProbe>) -> Self {
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(20, 35, 43);
-        visuals.window_fill = visuals.panel_fill;
-        visuals.extreme_bg_color = egui::Color32::from_rgb(13, 23, 29);
-        visuals.override_text_color = Some(egui::Color32::from_rgb(224, 235, 232));
-        visuals.selection.bg_fill = egui::Color32::from_rgb(42, 85, 82);
-        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(43, 103, 91);
-        cc.egui_ctx.set_visuals(visuals);
-        cc.egui_ctx.style_mut(|s| {
-            s.spacing.item_spacing = egui::vec2(10.0, 9.0);
-            s.spacing.button_padding = egui::vec2(13.0, 8.0);
-            s.text_styles
-                .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-        });
+        ui::configure(&cc.egui_ctx);
         let render_state = cc
             .wgpu_render_state
             .clone()
@@ -147,7 +149,7 @@ impl NodiformApp {
             tick: 0,
             last_event: 0,
             components: 0,
-            status: "Start with the ABC experiment. Validate, then preview its growth.".into(),
+            status: "Your rules, your structure. Edit the script, then choose Preview.".into(),
             error: None,
             last_sample: Instant::now(),
             adapter,
@@ -155,8 +157,22 @@ impl NodiformApp {
             inspected_position: None,
             confirm_example: None,
             smoke_probe,
+            editor_tab: EditorTab::Rules,
+            show_settings: false,
+            show_inspector: false,
+            smoke_frame_checked: false,
         };
         if app.smoke_probe.is_some() {
+            if let Ok(example) = std::env::var("NODIFORM_SMOKE_EXAMPLE") {
+                app.load_example(&example);
+            }
+            if std::env::var("NODIFORM_SMOKE_TAB").as_deref() == Ok("inputs") {
+                app.editor_tab = EditorTab::Inputs;
+            }
+            app.show_settings = std::env::var("NODIFORM_SMOKE_SETTINGS").as_deref() == Ok("1");
+            if std::env::var("NODIFORM_SMOKE_DEGREE").as_deref() == Ok("1") {
+                app.project.size_by_connections = true;
+            }
             // Exercise the actual child process, timeline and rendering path.
             // Preview never creates a project, recording or output directory.
             app.request(Intent::Preview);
@@ -184,20 +200,36 @@ impl NodiformApp {
             return;
         }
         let frames = probe.frames;
-        let result = if let Some(error) = &self.error {
-            Err(error.clone())
-        } else {
-            self.validate_smoke_frame().map(|()| {
-                format!(
+        if self.error.is_none() && !self.smoke_frame_checked {
+            if let Err(error) = self.validate_smoke_frame() {
+                self.error = Some(error);
+            }
+            self.smoke_frame_checked = true;
+            self.paused = true;
+        }
+        if self.error.is_none() {
+            match self.smoke_probe.as_mut().unwrap().capture(ctx) {
+                Ok(false) => {
+                    ctx.request_repaint();
+                    return;
+                }
+                Ok(true) => {}
+                Err(error) => self.error = Some(error),
+            }
+        }
+        let result = self.error.clone().map_or_else(
+            || {
+                Ok(format!(
                     "{} GUI updates, {} ticks, {} nodes, {} edges; {}",
                     frames,
                     self.tick,
                     self.graph.nodes.len(),
                     self.graph.edges.len(),
                     self.adapter
-                )
-            })
-        };
+                ))
+            },
+            Err,
+        );
         self.smoke_probe.as_mut().unwrap().complete(result);
         self.stop();
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -280,6 +312,7 @@ impl NodiformApp {
                 "source_sha256":format!("{:x}", Sha256::digest(snapshot.source.as_bytes())),
                 "adapter":self.adapter, "force_profile":"nodiform-exact-v1",
                 "rule_api":crate::rules::RULE_API_VERSION,
+                "node_size_rule":if snapshot.size_by_connections { "obsidian-global-sqrt-uncapped-v1" } else { "rule-radius" },
                 "forces":{"repulsion":64,"softening_squared":0.25,"rest_length":0,"gravity":0,"max_displacement":2,"step_policy":"min(1/120,0.5/max_incident_strength)"},
                 "birth_placement":crate::model::BIRTH_PLACEMENT_VERSION,
                 "ticks_per_frame":snapshot.ticks_per_frame,
@@ -303,6 +336,7 @@ impl NodiformApp {
 
     fn begin_simulation(&mut self, snapshot: Project, plan: Plan) {
         self.graph = Graph::new(snapshot.seed);
+        self.gpu.set_degree_sizing(snapshot.size_by_connections);
         self.gpu.sync_graph(&self.graph, true);
         self.timeline = Some(Timeline::new(plan, snapshot.tail_ticks));
         self.project = snapshot;
@@ -558,6 +592,9 @@ impl NodiformApp {
                     self.parameters_text =
                         serde_json::to_string_pretty(&project.parameters).unwrap();
                     self.project = project;
+                    self.gpu.set_degree_sizing(self.project.size_by_connections);
+                    let (width, height) = self.gpu.dimensions();
+                    self.gpu.render(width, height);
                     self.project_path = Some(path);
                     self.status = "Project opened. Validate or preview when ready.".into();
                     self.error = None;
@@ -566,362 +603,22 @@ impl NodiformApp {
             }
         }
     }
-
-    fn toolbar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("header")
-            .frame(
-                egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(16, 27, 34))
-                    .inner_margin(16),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new("◉").size(26.0).color(MINT));
-                    ui.label(egui::RichText::new("Nodiform").size(24.0).strong());
-                    ui.label(
-                        egui::RichText::new("EMERGENT GRAPH LAB")
-                            .size(10.0)
-                            .color(MUTED),
-                    );
-                    ui.separator();
-                    let idle = !self.busy();
-                    if ui
-                        .add_enabled(idle, egui::Button::new("Validate"))
-                        .on_hover_text("Check rules and graph constraints without running physics")
-                        .clicked()
-                    {
-                        self.request(Intent::Validate);
-                    }
-                    if ui
-                        .add_enabled(idle, egui::Button::new("▷ Preview"))
-                        .clicked()
-                    {
-                        self.request(Intent::Preview);
-                    }
-                    if ui
-                        .add_enabled(
-                            idle,
-                            egui::Button::new(
-                                egui::RichText::new("● Run & Record")
-                                    .color(egui::Color32::from_rgb(12, 35, 29)),
-                            )
-                            .fill(MINT),
-                        )
-                        .clicked()
-                    {
-                        self.request(Intent::Record);
-                    }
-                    if ui
-                        .add_enabled(
-                            self.timeline.as_ref().is_some_and(|t| !t.finished())
-                                && !self.finishing,
-                            egui::Button::new(if self.paused { "Resume" } else { "Pause" }),
-                        )
-                        .clicked()
-                    {
-                        self.paused = !self.paused;
-                    }
-                    if ui
-                        .add_enabled(
-                            self.paused
-                                && self.pending_frame.is_none()
-                                && !self.finishing
-                                && self.timeline.as_ref().is_some_and(|t| !t.finished()),
-                            egui::Button::new("Step"),
-                        )
-                        .on_hover_text("Advance exactly one output-frame interval")
-                        .clicked()
-                    {
-                        if let Err(error) = self.advance_frame() {
-                            self.error = Some(error);
-                            self.stop();
-                        }
-                    }
-                    if ui
-                        .add_enabled(self.busy(), egui::Button::new("Stop"))
-                        .clicked()
-                    {
-                        self.stop();
-                    }
-                });
-            });
-    }
-
-    fn side_panel(&mut self, ctx: &egui::Context) {
-        let enabled = !self.busy();
-        egui::SidePanel::left("rules")
-            .resizable(true)
-            .default_width(510.0)
-            .width_range(370.0..=900.0)
-            .show(ctx, |ui| {
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    ui.heading("Your rules");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(enabled, egui::Button::new("Save…"))
-                            .clicked()
-                        {
-                            self.save();
-                        }
-                        if ui
-                            .add_enabled(enabled, egui::Button::new("Open…"))
-                            .clicked()
-                        {
-                            self.open();
-                        }
-                    });
-                });
-                ui.label(
-                    egui::RichText::new("Define a process. Watch a structure emerge.").color(MUTED),
-                );
-                egui::ScrollArea::vertical()
-                    .id_salt("experiment_settings")
-                    .max_height(180.0)
-                    .show(ui, |ui| {
-                        ui.add_enabled_ui(enabled, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("Start from");
-                                if ui.small_button("ABC permutations").clicked() {
-                                    self.confirm_example = Some("abc");
-                                }
-                                if ui.small_button("Growing ring").clicked() {
-                                    self.confirm_example = Some("ring");
-                                }
-                            });
-                            egui::CollapsingHeader::new("Experiment parameters")
-                                .default_open(false)
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Seed");
-                                        ui.add(egui::DragValue::new(&mut self.project.seed));
-                                        ui.label("Settle ticks");
-                                        ui.add(
-                                            egui::DragValue::new(&mut self.project.tail_ticks)
-                                                .range(0..=10_000_000),
-                                        );
-                                    });
-                                    self.easy_parameters(ui);
-                                    egui::CollapsingHeader::new("All parameters · JSON").show(
-                                        ui,
-                                        |ui| {
-                                            ui.add(
-                                                egui::TextEdit::multiline(
-                                                    &mut self.parameters_text,
-                                                )
-                                                .font(egui::TextStyle::Monospace)
-                                                .desired_rows(6)
-                                                .desired_width(f32::INFINITY)
-                                                .code_editor(),
-                                            );
-                                        },
-                                    );
-                                });
-                            egui::CollapsingHeader::new("Recording & timing").show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label("Resolution");
-                                    egui::ComboBox::from_id_salt("resolution")
-                                        .selected_text(format!(
-                                            "{} × {}",
-                                            self.project.recording.width,
-                                            self.project.recording.height
-                                        ))
-                                        .show_ui(ui, |ui| {
-                                            for (w, h) in [(1280, 720), (1920, 1080), (3840, 2160)]
-                                            {
-                                                if ui
-                                                    .selectable_label(
-                                                        self.project.recording.width == w,
-                                                        format!("{w} × {h}"),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    self.project.recording.width = w;
-                                                    self.project.recording.height = h;
-                                                }
-                                            }
-                                        });
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("FPS");
-                                    ui.add(
-                                        egui::DragValue::new(&mut self.project.recording.fps)
-                                            .range(1..=120),
-                                    );
-                                    ui.label("Ticks/frame");
-                                    ui.add(
-                                        egui::DragValue::new(&mut self.project.ticks_per_frame)
-                                            .range(1..=240),
-                                    );
-                                });
-                                egui::ComboBox::from_id_salt("codec")
-                                    .selected_text(&self.project.recording.codec)
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut self.project.recording.codec,
-                                            "libx264".into(),
-                                            "H.264 · CPU, high quality",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.project.recording.codec,
-                                            "h264_nvenc".into(),
-                                            "H.264 · NVIDIA NVENC",
-                                        );
-                                    });
-                                if ui.button("Choose video folder…").clicked() {
-                                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                        self.output_dir = path;
-                                    }
-                                }
-                                ui.label(
-                                    egui::RichText::new(self.output_dir.display().to_string())
-                                        .small()
-                                        .color(MUTED),
-                                );
-                                ui.label(
-                                    egui::RichText::new(
-                                        "MKV video + reproducible rule manifest. FFmpeg required.",
-                                    )
-                                    .small(),
-                                );
-                            });
-                        });
-                    });
-                ui.separator();
-                editor::show(ui, &mut self.project.source, enabled);
-            });
-    }
-
-    fn easy_parameters(&mut self, ui: &mut egui::Ui) {
-        let Ok(mut value) = serde_json::from_str::<Value>(&self.parameters_text) else {
-            return;
-        };
-        let mut changed = false;
-        if let Some(alphabet) = value
-            .get("alphabet")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        {
-            let mut alphabet = alphabet;
-            ui.horizontal(|ui| {
-                ui.label("Alphabet");
-                changed |= ui
-                    .add(egui::TextEdit::singleline(&mut alphabet).desired_width(90.0))
-                    .changed();
-            });
-            value["alphabet"] = json!(alphabet);
-        }
-        if let Some(length) = value.get("maxLength").and_then(Value::as_u64) {
-            let mut length = length;
-            ui.horizontal(|ui| {
-                ui.label("Maximum length");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut length).range(1..=10))
-                    .changed();
-            });
-            value["maxLength"] = json!(length);
-        }
-        if let Some(repeat) = value.get("repetitions").and_then(Value::as_bool) {
-            let mut repeat = repeat;
-            changed |= ui
-                .checkbox(&mut repeat, "Allow repeated letters, such as AA")
-                .changed();
-            value["repetitions"] = json!(repeat);
-        }
-        if let Some(order) = value.get("order").and_then(Value::as_str) {
-            let mut order = order.to_string();
-            egui::ComboBox::from_id_salt("order")
-                .selected_text(&order)
-                .show_ui(ui, |ui| {
-                    for option in ["lexicographic", "reverse", "shuffle"] {
-                        changed |= ui
-                            .selectable_value(&mut order, option.into(), option)
-                            .changed();
-                    }
-                });
-            value["order"] = json!(order);
-        }
-        if changed {
-            self.parameters_text = serde_json::to_string_pretty(&value).unwrap();
-        }
-    }
-
-    fn canvas(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::from_rgb(10, 18, 24)).inner_margin(20)).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("OBSERVATORY").color(MUTED).size(11.0));
-                ui.label(if self.paused { "Paused" } else if self.busy() { "● Live" } else { "Ready" });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(egui::RichText::new("2D  /  AUTO FIT  /  NO GRAVITY").color(MUTED).size(10.0)); });
-            });
-            let available = egui::vec2(ui.available_width(), (ui.available_height() - 135.0).max(100.0));
-            let aspect = self.gpu.dimensions().0 as f32 / self.gpu.dimensions().1 as f32;
-            let size = if available.x / available.y > aspect { egui::vec2(available.y * aspect, available.y) } else { egui::vec2(available.x, available.x / aspect) };
-            ui.vertical_centered(|ui| { ui.add(egui::Image::new((self.texture, size))); });
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                for (number, label) in [(self.graph.nodes.len() as u64,"nodes"),(self.graph.edges.len() as u64,"edges"),(self.tick,"ticks"),(self.components as u64,"components")] {
-                    ui.label(egui::RichText::new(number.to_string()).size(21.0).color(MINT)); ui.label(egui::RichText::new(label).color(MUTED)); ui.add_space(12.0);
-                }
-            });
-            if self.components > 1 { ui.label(egui::RichText::new("Disconnected components can drift apart: repulsion is active and gravity is deliberately absent.").small().color(egui::Color32::from_rgb(232, 186, 117))); }
-            if !self.graph.nodes.is_empty() {
-                egui::CollapsingHeader::new("Inspect a node").show(ui, |ui| {
-                    self.inspector = self.inspector.min(self.graph.nodes.len()-1);
-                    ui.horizontal(|ui| {
-                        ui.label("Node index");
-                        if ui.add(egui::DragValue::new(&mut self.inspector).range(0..=self.graph.nodes.len()-1)).changed() { self.inspected_position = None; }
-                        let node = &self.graph.nodes[self.inspector];
-                        ui.label(format!("{} · radius {} · {} connections", node.label, node.radius, self.graph.edges.iter().filter(|e| e.source == self.inspector || e.target == self.inspector).count()));
-                    });
-                    if ui.add_enabled(self.paused || !self.busy(), egui::Button::new("Read current position")).clicked() {
-                        match self.gpu.read_positions(self.graph.nodes.len()) {
-                            Ok(positions) => self.inspected_position = positions.get(self.inspector).copied(),
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
-                    if let Some([x,y]) = self.inspected_position { ui.label(format!("x {x:.3}   y {y:.3}")); }
-                });
-            }
-        });
-    }
 }
 
 impl eframe::App for NodiformApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
+        if !self.busy()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter))
+        {
+            self.request(Intent::Preview);
+        }
         self.toolbar(ctx);
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.add_space(6.0);
-            if let Some(error) = &self.error {
-                egui::ScrollArea::vertical()
-                    .id_salt("error_details")
-                    .max_height(90.0)
-                    .show(ui, |ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 154, 145), error);
-                    });
-            }
-            ui.label(&self.status);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(&self.adapter).small().color(MUTED));
-                if let Some(recorder) = &self.recorder {
-                    ui.label(format!(
-                        "{} frames {}",
-                        recorder.frames(),
-                        if self.finishing {
-                            "· finalising"
-                        } else if self.pending_frame.is_some() {
-                            "· encoder backpressure"
-                        } else {
-                            "· captured"
-                        }
-                    ))
-                    .on_hover_text(recorder.directory().display().to_string());
-                }
-            });
-            ui.add_space(6.0);
-        });
+        self.status_bar(ctx);
         self.side_panel(ctx);
         self.canvas(ctx);
+        self.settings(ctx);
+        self.inspector_window(ctx);
         if let Some(example) = self.confirm_example {
             egui::Window::new("Replace the current rules?")
                 .collapsible(false)
@@ -934,15 +631,7 @@ impl eframe::App for NodiformApp {
                             self.confirm_example = None;
                         }
                         if ui.button("Load example").clicked() {
-                            self.project = Project::default();
-                            if example == "ring" {
-                                self.project.source = include_str!("../examples/ring.js").into();
-                                self.project.parameters = json!({"count":80,"ticksPerNode":12});
-                            }
-                            self.parameters_text =
-                                serde_json::to_string_pretty(&self.project.parameters).unwrap();
-                            self.project_path = None;
-                            self.confirm_example = None;
+                            self.load_example(example);
                         }
                     });
                 });

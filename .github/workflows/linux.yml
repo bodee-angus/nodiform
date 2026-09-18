@@ -28,6 +28,16 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-nodiform-rust-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-nodiform-rust-
+
       - name: Read release version
         id: version
         run: python3 -c 'import tomllib, os; v=tomllib.load(open("Cargo.toml","rb"))["package"]["version"]; print("version="+v, file=open(os.environ["GITHUB_OUTPUT"],"a"))'
@@ -55,7 +65,20 @@ jobs:
         env:
           XDG_RUNTIME_DIR: /tmp
           WINIT_UNIX_BACKEND: x11
-        run: timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+        run: |
+          mkdir -p ui-review
+          NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/rules.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+          NODIFORM_SMOKE_EXAMPLE=complete NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/inputs.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+          NODIFORM_SMOKE_EXAMPLE=complete NODIFORM_SMOKE_DEGREE=1 NODIFORM_SMOKE_SETTINGS=1 NODIFORM_SMOKE_COMPACT=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/compact-settings.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+
+      - name: Upload native interface captures
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nodiform-interface-review
+          path: ui-review/*.ppm
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Package portable archive
         run: bash packaging/package-linux.sh

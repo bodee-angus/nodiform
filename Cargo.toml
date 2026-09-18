@@ -20,7 +20,7 @@ rfd = "0.15"
 naga = { version = "24", features = ["wgsl-in"] }
 
 [profile.release]
-lto = "thin"
+lto = false
 strip = true
 
 [profile.dev]

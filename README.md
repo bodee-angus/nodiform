@@ -2,7 +2,7 @@
 
 A native laboratory for emergent graphs. Write rules, choose the order in which a graph grows, and watch its structure develop in two dimensions.
 
-Nodiform is an early desktop alpha, designed with Bazzite Linux in mind. It is not yet a tested Bazzite distribution or a finished large-graph engine.
+Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.1 adds an AppImage with desktop integration and an update channel through Gear Lever. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding.
 
 ## What this version does
 
@@ -17,11 +17,15 @@ The included ABC experiment generates ordered strings and connects each longer s
 
 ## Run the desktop app
 
-Use a Linux build from a successful GitHub Actions run, when one is available, or build from source below. Extract the portable archive and open the `nodiform` executable from your file manager. Your desktop may require you to enable executable permission in the file's properties. This is a native executable, not an AppImage or a Flatpak.
+Download **[Nodiform-x86_64.AppImage](https://github.com/bodee-angus/nodiform/releases/latest/download/Nodiform-x86_64.AppImage)** from the [latest release](https://github.com/bodee-angus/nodiform/releases/latest). On Bazzite, install **Gear Lever** from **Bazaar**, then open the AppImage with Gear Lever and integrate it into your application menu. You can then find **Nodiform** through desktop search. Bazzite recommends Gear Lever for managing AppImages. See the [installation and update guide](docs/appimage.md) for details. [Bazzite documentation](https://docs.bazzite.gg/Installing_and_Managing_Software/AppImage/)
 
-A working GPU driver with a compatible wgpu graphics backend is required. FFmpeg must be available on `PATH` for recording, including the selected encoder. It is not bundled in the portable archive. Preview does not require FFmpeg. The initial software encoding option uses `libx264`; an available NVIDIA encoder can be selected where supported by the app and local FFmpeg build.
+This x86_64 Linux package targets current Bazzite and uses an Ubuntu 24.04 build environment. Compatibility with older distributions is not promised. The AppImage contains the application, examples, documentation, and icon; it does not bundle GPU drivers or FFmpeg. It is a portable package, not a security sandbox.
+
+A working Vulkan-capable GPU driver is required. FFmpeg must be available on the host's `PATH` for recording, including the selected encoder. Preview does not require FFmpeg. The software encoding option uses `libx264`; `h264_nvenc` requires a compatible NVIDIA driver and FFmpeg build.
 
 On an immutable distribution such as Bazzite, use your preferred supported method to make FFmpeg available to the environment launching Nodiform. Installing it only inside an unrelated container does not make it available to a host-launched application.
+
+The older portable `.tar.gz` archive remains usable: extract it and open `nodiform` from your file manager, enabling executable permission if necessary. That archive does not provide AppImage update integration.
 
 ### A first experiment
 
@@ -53,14 +57,20 @@ cargo run --release --locked
 
 On Bazzite, a development container is a useful place to build without changing the base system. Package names differ by distribution. Running a GUI or accessing the GPU from inside a container requires that container's display and device integration; the commands above do not configure it.
 
-To make the portable archive after building:
+To make the AppImage after building:
 
 ```sh
 cargo build --release --locked
+bash packaging/package-appimage.sh
+```
+
+The packaging script downloads pinned, checksum-verified AppImage tooling and creates the application plus update metadata in `dist/`. It refuses to overwrite existing artifacts. See [packaging details](docs/appimage.md#build-and-release) for dependencies and release policy. The older portable archive can still be created with:
+
+```sh
 bash packaging/package-linux.sh
 ```
 
-The build workflow runs unit tests, exercises the GPU pipelines through software Vulkan, and produces a Linux archive. A successful CI build is not evidence of driver compatibility or interactive testing on a Bazzite machine.
+The build workflow includes unit tests, software-Vulkan GPU tests, and a native-window smoke test, then packages the Linux application. A successful CI build is not evidence of driver compatibility or interactive testing on a Bazzite machine.
 
 The archive also includes an optional desktop-entry template. Its `Exec=nodiform` assumes the executable is on your desktop session's `PATH`; it is not a portable relative-path launcher. You can open the executable itself without installing that template.
 
@@ -78,6 +88,6 @@ This alpha does **not** yet provide Barnes–Hut repulsion, resumable simulation
 
 ## Project status
 
-Rule/model tests, shader validation, and FFmpeg recording tests have passed in the development environment. GPU execution and the native interface have not been tested there because it has no usable graphics device/display. The CI software-Vulkan test provides a separate execution check when its workflow succeeds. Actual Bazzite testing and GPU performance measurements remain outstanding.
+Rule/model tests, shader validation, and FFmpeg recording tests have passed in the development environment. Check the [Actions results](https://github.com/bodee-angus/nodiform/actions) for each build's GPU and native-window smoke-test results. Those automated checks use software Vulkan and do not establish interactive performance on Bazzite or NVIDIA hardware.
 
 The repository is public. No open-source licence has been selected yet; public visibility alone does not grant a licence to redistribute or modify the project.

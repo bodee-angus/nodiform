@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Nodiform</title>
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="#10191f"/>
+  <g fill="none" stroke="#4c918c" stroke-width="7" stroke-linecap="round">
+    <path d="M65 182V73L188 182V73M65 73L128 45L188 73M65 182L128 212L188 182M128 45L128 212"/>
+  </g>
+  <g fill="#79dfc7" stroke="#10191f" stroke-width="5">
+    <circle cx="65" cy="73" r="18"/>
+    <circle cx="188" cy="73" r="18"/>
+    <circle cx="65" cy="182" r="18"/>
+    <circle cx="188" cy="182" r="18"/>
+    <circle cx="128" cy="128" r="16"/>
+  </g>
+  <g fill="#f2eadb" stroke="#10191f" stroke-width="4">
+    <circle cx="128" cy="45" r="11"/>
+    <circle cx="128" cy="212" r="11"/>
+  </g>
+</svg>

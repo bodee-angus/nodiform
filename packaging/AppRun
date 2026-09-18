@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+# Keep the user's PATH, graphics drivers, desktop session and writable locations.
+# The AppImage runtime supplies APPDIR; the fallback also permits extracted use.
+nodiform_appdir=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
+exec "$nodiform_appdir/usr/bin/nodiform" "$@"

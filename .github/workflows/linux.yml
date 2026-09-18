@@ -14,6 +14,8 @@ jobs:
     name: Test and package Linux x86_64
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -21,10 +23,14 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential pkg-config libxkbcommon-dev libwayland-dev libx11-dev libudev-dev ffmpeg mesa-vulkan-drivers
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config libxkbcommon-dev libwayland-dev libx11-dev libudev-dev ffmpeg mesa-vulkan-drivers xvfb xauth desktop-file-utils zsync
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Read release version
+        id: version
+        run: python3 -c 'import tomllib, os; v=tomllib.load(open("Cargo.toml","rb"))["package"]["version"]; print("version="+v, file=open(os.environ["GITHUB_OUTPUT"],"a"))'
 
       - name: Test
         run: cargo test --locked
@@ -37,6 +43,20 @@ jobs:
       - name: Build release executable
         run: cargo build --release --locked
 
+      - name: Build updateable AppImage
+        run: bash packaging/package-appimage.sh
+
+      - name: Test packaged command-line entry and embedded update information
+        run: |
+          dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --version
+          test "$(dist/Nodiform-x86_64.AppImage --appimage-updateinformation)" = 'gh-releases-zsync|bodee-angus|nodiform|latest|Nodiform-x86_64.AppImage.zsync'
+
+      - name: Test packaged native window, rules worker, and rendering
+        env:
+          XDG_RUNTIME_DIR: /tmp
+          WINIT_UNIX_BACKEND: x11
+        run: timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+
       - name: Package portable archive
         run: bash packaging/package-linux.sh
 
@@ -47,3 +67,45 @@ jobs:
           path: dist/nodiform-linux-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload AppImage release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodiform-appimage-x86_64
+          path: |
+            dist/Nodiform-x86_64.AppImage
+            dist/Nodiform-x86_64.AppImage.zsync
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish new version to the AppImage update channel
+    needs: test-and-package
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'bodee-angus/nodiform'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: nodiform-release
+      cancel-in-progress: false
+    steps:
+      - name: Check out tested source
+        uses: actions/checkout@v4
+
+      - name: Download tested release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: nodiform-appimage-x86_64
+          path: dist
+
+      - name: Verify downloaded bytes
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+
+      - name: Publish only if this version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NODIFORM_VERSION: ${{ needs.test-and-package.outputs.version }}
+        run: node packaging/publish-release.mjs

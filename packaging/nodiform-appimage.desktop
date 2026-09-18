@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Nodiform
+Comment=A laboratory for emergent graphs
+Exec=nodiform
+Icon=nodiform
+Terminal=false
+Categories=Science;
+Keywords=graph;nodes;simulation;network;combinatorics;
+StartupNotify=true
+StartupWMClass=nodiform
+X-AppImage-Name=Nodiform
+X-AppImage-Arch=x86_64

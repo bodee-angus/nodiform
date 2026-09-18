@@ -1,4 +1,5 @@
 use crate::{
+    diagnostics::SmokeProbe,
     editor,
     gpu::GpuGraph,
     model::{Graph, Plan},
@@ -84,10 +85,11 @@ pub struct NodiformApp {
     inspector: usize,
     inspected_position: Option<[f32; 2]>,
     confirm_example: Option<&'static str>,
+    smoke_probe: Option<SmokeProbe>,
 }
 
 impl NodiformApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, smoke_probe: Option<SmokeProbe>) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = egui::Color32::from_rgb(20, 35, 43);
         visuals.window_fill = visuals.panel_fill;
@@ -121,7 +123,7 @@ impl NodiformApp {
             wgpu::FilterMode::Linear,
         );
         let project = Project::default();
-        Self {
+        let mut app = Self {
             parameters_text: serde_json::to_string_pretty(&project.parameters).unwrap(),
             project,
             project_path: None,
@@ -152,7 +154,14 @@ impl NodiformApp {
             inspector: 0,
             inspected_position: None,
             confirm_example: None,
+            smoke_probe,
+        };
+        if app.smoke_probe.is_some() {
+            // Exercise the actual child process, timeline and rendering path.
+            // Preview never creates a project, recording or output directory.
+            app.request(Intent::Preview);
         }
+        app
     }
 
     fn busy(&self) -> bool {
@@ -160,6 +169,69 @@ impl NodiformApp {
             || self.recorder_start.is_some()
             || self.recorder.is_some()
             || self.timeline.as_ref().is_some_and(|t| !t.finished())
+    }
+
+    fn check_smoke_test(&mut self, ctx: &egui::Context) {
+        let Some(probe) = &mut self.smoke_probe else {
+            return;
+        };
+        if probe.completed {
+            return;
+        }
+        let ready = probe.ready(self.tick, self.graph.nodes.len(), self.graph.edges.len());
+        if !ready && self.error.is_none() {
+            ctx.request_repaint_after(Duration::from_millis(8));
+            return;
+        }
+        let frames = probe.frames;
+        let result = if let Some(error) = &self.error {
+            Err(error.clone())
+        } else {
+            self.validate_smoke_frame().map(|()| {
+                format!(
+                    "{} GUI updates, {} ticks, {} nodes, {} edges; {}",
+                    frames,
+                    self.tick,
+                    self.graph.nodes.len(),
+                    self.graph.edges.len(),
+                    self.adapter
+                )
+            })
+        };
+        self.smoke_probe.as_mut().unwrap().complete(result);
+        self.stop();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn validate_smoke_frame(&self) -> Result<(), String> {
+        let positions = self.gpu.read_positions(self.graph.nodes.len())?;
+        if positions.len() != self.graph.nodes.len()
+            || positions.iter().flatten().any(|value| !value.is_finite())
+        {
+            return Err("GPU readback contained invalid node positions.".into());
+        }
+        if !positions
+            .iter()
+            .zip(&self.graph.nodes)
+            .any(|(position, node)| {
+                (position[0] - node.position[0]).abs() > 0.001
+                    || (position[1] - node.position[1]).abs() > 0.001
+            })
+        {
+            return Err("GPU physics did not move any nodes.".into());
+        }
+        let pixels = self.gpu.read_rgba()?;
+        let (width, height) = self.gpu.dimensions();
+        if pixels.len() != width as usize * height as usize * 4
+            || !pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel != &pixels[..4])
+        {
+            return Err("GPU renderer returned an empty or uniform frame.".into());
+        }
+        Ok(())
     }
 
     fn parse_parameters(&mut self) -> Result<(), String> {
@@ -885,6 +957,7 @@ impl eframe::App for NodiformApp {
             self.status =
                 "Finishing safely. Close the window again when the video has been saved.".into();
         }
+        self.check_smoke_test(ctx);
     }
 }
 

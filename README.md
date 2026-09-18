@@ -2,18 +2,22 @@
 
 A native laboratory for emergent graphs. Write rules, choose the order in which a graph grows, and watch its structure develop in two dimensions.
 
-Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.1 adds an AppImage with desktop integration and an update channel through Gear Lever. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding.
+Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.2 gives experiments a general rule API, optional inputs declared by their own scripts, and a redesigned interface. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding.
 
 ## What this version does
 
-- Runs editable JavaScript generators that create nodes and edges in a precise sequence.
+- Runs editable JavaScript rules that create nodes and edges in a precise sequence.
+- Builds optional input controls from each script, without assuming an alphabet, node count, or graph family.
 - Applies code-defined colours, world-space node radii, and edge strengths, including changes later in a run.
 - Calculates repulsion and weighted attraction on the GPU, and renders the graph on the GPU.
 - Fits the whole graph into the view. Nodes become smaller on screen as the camera zooms out.
 - Provides a syntax-coloured rule editor, line numbers, snippets, starter examples, and an in-app API reference.
-- Offers a quick preview and a formal **Run & Record** path that streams fixed-timeline video to FFmpeg.
+- Offers **Preview** and **Record** actions; recording streams fixed-timeline video to FFmpeg.
+- Optionally sizes nodes by connection count without changing the simulation's forces.
 
-The included ABC experiment generates ordered strings and connects each longer string to its contiguous shorter substrings: `ABC` connects to `AB` and `BC`. Repeated letters are a separate choice, not an implicit meaning of “combinations.” The Growing ring starter builds a chain, then closes it into a ring without prearranging the nodes in a circle.
+The default experiment is a small eight-node chain with no required inputs. **Experiment → Examples** contains a graph in which each new node connects to every earlier node, letter permutations, a growing ring, and modular residues. The complete-growth example creates 500 nodes and 124,750 edges. These are editable experiments, not fixed application modes.
+
+The native egui interface uses light cards, rounded controls, and blue accents around a dark simulation canvas. Its appearance does not depend on Apple frameworks or a system backdrop-blur effect.
 
 ## Run the desktop app
 
@@ -29,16 +33,18 @@ The older portable `.tar.gz` archive remains usable: extract it and open `nodifo
 
 ### A first experiment
 
-1. Start with **ABC permutations** or **Growing ring** and inspect its JavaScript. Loading a starter asks before replacing current edits.
-2. Expand **Experiment parameters** for the seed and simple ABC controls, including alphabet, maximum length, repeated letters, and generation order. **All parameters · JSON** exposes the complete input.
+1. Open the **Rules** tab and inspect the eight-node starter, or choose **Experiment → Examples**. Loading an example asks before replacing current edits.
+2. Use **Inputs** for any controls declared by that script. **Advanced · Input JSON** exposes all stored inputs, including custom arrays and objects. A script without declared controls can keep its values directly in code.
 3. Use **Validate** to check the rules before starting a run.
 4. Use **Preview** to explore the result without recording.
-5. Use **Run & Record** for a recorded experiment. A run uses a snapshot of its source, parameters, and seed. The selected encoder is checked in the background before playback begins.
+5. Use **Record** for a recorded experiment. A run uses a snapshot of its source, inputs, seed, and settings. The selected encoder is checked in the background before playback begins.
 6. Pause, advance one output-frame interval with **Step**, or stop using the run controls. Let recording finalisation finish before closing the app.
 
-The rule editor is the source of truth. Parameters are inputs to your program, not an alternative hidden rule system. Settings start collapsed to leave room for the code. Starting a run uses the current editor content; it does not reload a starter. See the [rule guide](docs/rules.md) for a small complete example.
+The rule editor is the source of truth. Define `function build(graph, p)` and use ordinary loops to describe creation, connections, and waits. The older `function* generate(N, params)` API remains supported. Starting a run uses the current editor content; it does not reload an example. See the [rule guide](docs/rules.md) for complete examples.
 
-Use **Open** and **Save** to keep a `.nodiform.json` project containing the source, parameters, seed, and run/recording settings. This saves an experiment definition, not the current moving graph or a resume checkpoint. A folder chooser sets the recording destination; the default is `Videos/Nodiform` under your home directory, with a separate uniquely named folder for each run. Runs write `simulation.mkv` and `manifest.json`; `run-outcome.json` records whether the simulation completed its planned timeline or stopped early.
+**Settings** contains the random seed, final settling interval, video settings, and **Size nodes by connections**. That sizing option affects appearance only, remains proportional to the script's radius, and still shrinks with zoom. It can change during preview and is locked during recording. **Inspect** opens the inspector for graph details.
+
+Use **Experiment → Open…** and **Save…** to keep a `.nodiform.json` project containing the source, inputs, seed, and run/recording settings. This saves an experiment definition, not the current moving graph or a resume checkpoint. Older project files still open; connection-based sizing defaults to off if absent. **Choose video folder…** in Settings sets the recording destination; the default is `Videos/Nodiform` under your home directory, with a separate uniquely named folder for each run. Runs write `simulation.mkv` and `manifest.json`; `run-outcome.json` records whether the simulation completed its planned timeline or stopped early.
 
 The initial app settings use 1280 × 720 output at 60 fps, four solver ticks per frame, and 240 extra relaxation ticks after the generated plan. Higher output resolutions increase readback bandwidth, encoding cost, and disk use without changing the graph's rules.
 
@@ -76,7 +82,7 @@ The archive also includes an optional desktop-entry template. Its `Exec=nodiform
 
 ## Physics and recording limits
 
-The first solver evaluates every pair of nodes, so repulsion costs **O(N²)** per tick. This build limits graphs to **8,192 nodes and 100,000 edges**. Those are validation limits, not a promise of interactive frame rates. Dense graphs can be expensive well below them.
+The first solver evaluates every pair of nodes, so repulsion costs **O(N²)** per tick. This build limits graphs to **8,192 nodes and 250,000 edges**, with GPU buffers reserved for those capacities. Those are validation limits, not a promise of interactive frame rates. Dense graphs can be expensive well below them. The rule worker has a 64 MiB JavaScript heap limit and a 16 MiB generated event-JSON limit; a large experiment can hit either before reaching the graph caps.
 
 Forces consist of softened repulsion and weighted zero-rest-length attraction. There is no centring gravity. The camera follows the graph without applying a force to it. Disconnected attraction components can therefore drift apart indefinitely. Zero-strength edges do not hold components together.
 

@@ -1,94 +1,144 @@
 # Writing a graph experiment
 
-Rules are real JavaScript, evaluated by QuickJS in a separate worker process. Define `function* generate(N, params)` and yield graph events. The application validates the resulting finite plan before playback.
+Rules are JavaScript, evaluated by QuickJS in a separate worker process. Define an ordinary synchronous `function build(graph, p)`. The application validates its complete finite event plan before playback. There is no TypeScript compiler or language server in this alpha; **Validate** checks execution and graph consistency.
 
-There is no TypeScript compiler or language server in this alpha. Syntax colouring and the API reference help with editing; **Validate** checks execution and graph consistency.
+The **Rules** tab holds the program. **Inputs** shows optional controls declared by that program. An alphabet, a node count, or a choice of graph family has no special meaning to the application.
 
-## A complete small example
+## Start with a small chain
+
+The default experiment has no inputs. Its values live directly in the code:
 
 ```js
-function* generate(N, params) {
-  yield N.batch([
-    N.node("A", { color: "#79dfc7" }),
-    N.node("B", { color: "#a6bfff" })
-  ], []);
-
-  yield N.wait(120);
-
-  yield N.batch([
-    N.node("AB", { color: "#f4c97a", radius: 2 })
-  ], [
-    N.edge("AB", "A", { id: "AB-A", strength: 1 }),
-    N.edge("AB", "B", { id: "AB-B", strength: 1 })
-  ]);
-
-  yield N.wait(240);
-  yield N.setEdge("AB-A", { strength: 2, color: "#f4c97acc" });
-  yield N.wait(240);
+function build(graph) {
+  for (let n = 1; n <= 8; n++) {
+    graph.add(n, { color: "#8ecbff" });
+    if (n > 1) graph.connect(n, n - 1, { strength: 1 });
+    graph.wait(24);
+  }
 }
 ```
 
-An edge can refer to nodes already created or nodes in the same batch. If any item in a batch is invalid, none of that batch is applied.
+`graph.add` creates a node specification. `graph.connect` adds connections. `graph.wait` commits pending additions as a batch and schedules solver ticks before the next changes. Pending additions are also committed at the end of `build`, or before a node/edge update. A batch is transactional: if any item is invalid, none of that batch is applied.
 
-## Helpers
+## Connect every new node to every earlier node
 
-| Helper | Meaning |
+```js
+function build(graph) {
+  for (let n = 1; n <= 500; n++) {
+    graph.add(n);
+    graph.connect(n, graph.others(n), { strength: 1 });
+    graph.wait(6);
+  }
+}
+```
+
+This creates 500 nodes and `500 × 499 / 2 = 124,750` edges. Each pair is connected once, with no self-connections. **Experiment → Examples → Connect to every earlier node** includes this growth rule with optional inputs for count, interval, strength, and colours. Its default of 500 is an example value, not an application-wide limit or a performance promise.
+
+## Builder API
+
+| Call | Meaning |
 | --- | --- |
-| `N.node(id, options)` | Construct a node specification for a batch. |
-| `N.edge(source, target, options)` | Construct an edge specification for a batch. Use an explicit `id` if you will update it. |
-| `N.batch(nodes, edges)` | Create the supplied nodes and edges together. Yield this event. |
-| `N.wait(ticks)` | Advance the force simulation by a specified number of ticks before the next event. |
-| `N.setNode(id, options)` | Change a node's colour or radius at this point in the sequence. |
-| `N.setEdge(id, options)` | Change an edge's colour or strength at this point in the sequence. |
-| `N.random()` | Draw from the run's seeded pseudorandom sequence. |
+| `graph.add(id, options)` | Add a node; return its normalised string ID. |
+| `graph.ids()` | Return all node IDs added so far, in insertion order. |
+| `graph.others(id)` | Return those IDs except the supplied ID. |
+| `graph.connect(source, targetOrTargets, options)` | Add edges to one ID or an array of IDs; return an array of edge IDs. |
+| `graph.wait(ticks)` | Commit pending additions, then advance the force simulation by this many ticks. |
+| `graph.setNode(id, options)` | Commit pending additions, then change a node's colour or radius. |
+| `graph.setEdge(id, options)` | Commit pending additions, then change an edge's colour or strength. |
+| `graph.random()` | Draw from the run's seeded pseudorandom sequence. |
 
-Node options are `label`, `color`, `radius`, and an optional initial `position: [x, y]`. Edge options are `id`, `color`, and `strength`. Colours accept `#RRGGBB` or `#RRGGBBAA`. Radius must be greater than zero and at most 1,000,000 world units. Strength must be between zero and 1,000,000; zero turns off that edge's attraction without deleting it. Each birth coordinate must have an absolute value of at most 1,000,000. All numeric values must be finite. These input bounds prevent extreme values from overflowing GPU arithmetic; typical experiments should use much smaller values.
+Node options are `label`, `color`, `radius`, and an optional initial `position: [x, y]`. Edge options are `id`, `color`, and `strength`. A custom edge ID can be supplied only when connecting to one target. For example:
 
-IDs are stable references. Node IDs must be unique among nodes and edge IDs unique among edges. Edges are attractive connections between their endpoints, not directed physical forces; the `source` and `target` names identify endpoints. Multiple differently named edges between two nodes add their attractions together.
+```js
+function build(graph) {
+  graph.add("A", { color: "#80c7ff", radius: 2 });
+  graph.add("B", { color: "#cda7ff", radius: 2 });
+  const [edge] = graph.connect("A", "B", { strength: 0.5 });
+  graph.wait(120);
+  graph.setEdge(edge, { strength: 2, color: "#ffffffaa" });
+  graph.wait(120);
+}
+```
 
-`N.node` and `N.edge` return specifications, not events. Put them inside `N.batch`; do not yield an individual specification directly.
+Builder IDs may be strings or finite numbers. Numeric IDs are converted to strings, so `1` and `"1"` refer to the same ID. Node IDs must be unique among nodes, and edge IDs unique among edges. An edge can refer to nodes already committed or added in the same pending batch.
+
+Colours accept `#RRGGBB` or `#RRGGBBAA`. Radius must be greater than zero and at most 1,000,000 world units. Strength must be between zero and 1,000,000; zero disables an edge's attraction without deleting it. Each birth coordinate must have an absolute value of at most 1,000,000. All numeric values must be finite. Typical experiments should use much smaller values.
+
+Edges attract both endpoints. `source` and `target` identify the connection; they do not make its force one-way. Multiple differently named edges between two nodes add their attractions together. Connection-based visual sizing deduplicates these differently, as described in the [architecture guide](architecture.md#connection-based-node-sizing).
+
+## Optional script-defined inputs
+
+Put an `@controls` block at the very beginning of the script when particular values should be adjustable in **Inputs**. The comment contains JSON, so use double quotes and no trailing commas:
+
+```js
+/* @controls {
+  "count": {
+    "type": "integer", "label": "Nodes",
+    "default": 500, "min": 1, "max": 500
+  },
+  "interval": {
+    "type": "integer", "label": "Ticks between births",
+    "default": 6, "min": 0, "max": 600
+  }
+} */
+function build(graph, p) {
+  for (let n = 1; n <= p.count; n++) {
+    graph.add(n);
+    graph.connect(n, graph.others(n));
+    graph.wait(p.interval);
+  }
+}
+```
+
+Each property name becomes a key on `p`. The required fields are `type`, `label`, and `default`; `description` is optional. Available types are:
+
+| Type | Value and optional fields |
+| --- | --- |
+| `integer` | Whole number; optional `min`, `max`, and `step`. |
+| `number` | Finite number; optional `min`, `max`, and `step`. |
+| `boolean` | `true` or `false`. |
+| `text` | String. |
+| `color` | Hex colour string. |
+| `select` | String chosen from the required `options` array of strings. |
+| `json` | Any JSON value, including arrays and objects. |
+
+Only the leading comment declares controls; whitespace before it is allowed. A script may expose up to 64 controls, with at most 64 KiB of metadata. Invalid metadata or input values produce an error rather than being silently replaced.
+
+Defaults fill missing input keys when compiling. Existing values take precedence, and undeclared keys remain available to the script. Merely opening **Inputs** does not replace stored values with defaults. **Advanced · Input JSON** edits the same input object, including properties without a control. A script without `@controls` can still read values from that object.
+
+The seed, playback timing, recording settings, and appearance options belong in the application's **Settings** window. Experiment-specific inputs belong to the script.
 
 ## Order and time are separate
 
-The generator's yield order determines event order. Creating or updating graph elements consumes no simulation ticks. `N.wait` is what lets the graph move between edits.
+Creation and updates consume no simulation ticks. `graph.wait` lets the graph move between edits. Creating a hundred nodes and then waiting therefore differs from waiting after each birth. Multiple operations without intervening waits give the solver no time to react between them.
 
-For example, creating one hundred nodes in a single batch differs from creating one node, waiting, then creating the next. Merely splitting a batch into successive events with no intervening waits does not give the solver time to react between them.
+A recording's frame rate and ticks per frame determine how ticks become video samples. A tick is neither one second nor necessarily one video frame. The solver's numerical mobility is separate from playback timing. The configured final settling interval runs after the plan has finished.
 
-A recording's frame rate and ticks per frame determine how these ticks are sampled into video. A tick is not one second and is not automatically one video frame. The solver's numerical step size is a mobility factor per tick, separate from playback timing. Any app-configured final relaxation interval runs after the generator has finished.
+For fair order comparisons, keep the seed, birth-position policy, waits, and solver settings fixed. Default birth positions are determined by the seed and node ID in a 24 × 24 world-unit square centred on the origin. They do not depend on neighbours' evolving positions. Supply `position` for a different placement rule.
 
-To test different orders fairly, keep the seed, birth-position policy, waits, and solver settings fixed. Default birth positions are deterministic from the seed and node ID in a 24 × 24 world-unit square centred on the origin. They do not depend on a neighbour's evolving position. Supply `position` if the experiment requires a different placement rule.
+Use `graph.random()` instead of `Math.random()`. Filesystem access, network access, a general module loader, wall-clock timers, and unseeded randomness are not exposed.
 
-## Parameters and colours
+## Existing generators still work
 
-`params` is the JSON value entered in the parameter editor. The ABC starter also exposes simple controls for commonly changed properties; these controls edit the same JSON. Read its properties directly, validate assumptions, and use ordinary JavaScript loops and functions to build a graph. A colour rule is just a function returning a colour string. Dynamic strength means yielding a strength update at a chosen point in the event sequence.
+Saved projects using `function* generate(N, params)` remain supported. Prefer a single entry function. If both names exist, `generate` takes precedence so older scripts can retain a helper named `build`. The legacy generator explicitly yields events:
 
-Use `N.random()` instead of `Math.random()` when an experiment needs randomness. The runner does not provide filesystem access, network access, or a general module loader. Do not rely on wall-clock time to schedule the simulation.
-
-The worker has memory and execution-time bounds. A rule that produces too much output or does not finish will be rejected. The full finite plan is generated before playback; an unbounded generator is not a way to run an experiment indefinitely.
-
-## The ABC experiment
-
-The starter example builds strings over an alphabet. Without repetition, `A`, `B`, and `C` produce six ordered two-letter strings and six ordered three-letter strings. The three-letter string `ABC` connects to `AB` and `BC`, its contiguous two-letter substrings, not to `AC`.
-
-Its parameters are `alphabet`, `maxLength`, `repetitions`, `order`, `ticksPerNode`, and `finalTicks`. For example:
-
-```json
-{
-  "alphabet": "ABC",
-  "maxLength": 3,
-  "repetitions": false,
-  "order": "lexicographic",
-  "ticksPerNode": 24,
-  "finalTicks": 0
+```js
+function* generate(N, params) {
+  yield N.batch([N.node("A"), N.node("B")], [
+    N.edge("A", "B", { id: "AB", strength: 1 })
+  ]);
+  yield N.wait(120);
+  yield N.setEdge("AB", { strength: 2 });
+  yield N.wait(120);
 }
 ```
 
-`order` accepts `"lexicographic"`, `"reverse"`, or `"shuffle"`. Each changes insertion order within a length layer, keeping shorter parent nodes available before longer children. Shuffle uses the seeded `N.random()` sequence. Legacy `repeatLetters` and `reverse` parameters are still accepted when their canonical counterparts are absent. `finalTicks` is an explicit wait in this example's rules and is additional to any final relaxation interval configured in the app.
+`N.node` and `N.edge` construct specifications for `N.batch`; they are not events to yield individually. `N.wait`, `N.setNode`, and `N.setEdge` produce events. `N.random` uses the same seeded sequence. Leading `@controls` metadata also works with this API.
 
-Allowing repetition changes the problem: a three-symbol alphabet then has nine two-letter strings and twenty-seven three-letter strings. Increasing alphabet size or maximum length can grow the graph very quickly. Validate before recording.
+## Included experiments and limits
 
-## Growing ring
+**Letter permutations** builds strings over an alphabet. With `ABC` and no repetition it creates six ordered two-letter strings and six ordered three-letter strings. `ABC` connects to the contiguous substrings `AB` and `BC`, not `AC`. Alphabet, length, repetition, and order are declared by that example's source. **Growing ring** builds a chain and closes its endpoints without prearranging a circle. **Modular residues** connects numbers by residue rules and can add explicit scaffold edges.
 
-The Growing ring starter accepts `count` (default 80), `ticksPerNode` (default 12), and `finalTicks` (default 0). It inserts a chain one node at a time and joins the last node to the first when there are at least three nodes. Birth positions use the usual seed-and-ID placement, so a circle is not supplied as the initial layout. Its node colours also use seeded randomness.
+The graph caps are 8,192 nodes and 250,000 edges. The worker also limits JavaScript heap memory to 64 MiB, stack memory to 512 KiB, generated event JSON to 16 MiB, and event count to 100,000. Source and parameter sizes, execution time, and instructions are bounded too. These limits interact: not every graph below the node/edge caps fits a plan.
 
-Node deletion, edge deletion, callbacks that inspect live positions, and an interactive JavaScript debugger are not part of this first rule API.
+The full plan must finish before playback. Infinite generators and functions are rejected; rules cannot inspect live GPU positions or react to solver state. Deletion, resumable checkpoints, async functions, and an interactive debugger are not part of this API. The worker isolates failures but is not a security sandbox for untrusted programs.

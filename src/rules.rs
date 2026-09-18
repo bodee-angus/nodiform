@@ -102,13 +102,20 @@ const RUNNER: &str = r#"
     delete globalThis.__nodiform_params;
     delete globalThis.__nodiform_seed;
     const stringify = JSON.stringify;
+    const parse = JSON.parse;
     const finite = Number.isFinite;
     const join = Function.prototype.call.bind(Array.prototype.join);
     const push = Function.prototype.call.bind(Array.prototype.push);
+    const filter = Function.prototype.call.bind(Array.prototype.filter);
+    const arrayFrom = Function.prototype.call.bind(Array.from, Array);
+    const isArray = Array.isArray;
+    const setHas = Function.prototype.call.bind(Set.prototype.has);
+    const setAdd = Function.prototype.call.bind(Set.prototype.add);
+    const toString = String;
     const freeze = Object.freeze;
     const define = Object.defineProperty;
     const ErrorType = Error;
-    const stringifyCopy = value => JSON.parse(stringify(value, (_key, value) => {
+    const stringifyCopy = value => parse(stringify(value, (_key, value) => {
         if (typeof value === 'number' && !finite(value)) {
             throw new ErrorType('Events cannot contain NaN or Infinity');
         }
@@ -159,11 +166,13 @@ const RUNNER: &str = r#"
     }
     function id(value) {
         if (typeof value === 'string') return value;
-        if (typeof value === 'number' && finite(value)) return String(value);
+        if (typeof value === 'number' && finite(value)) return toString(value);
         throw new ErrorType('Node and edge IDs must be strings or finite numbers');
     }
     let nodes = [], edges = [];
     const known = new Set();
+    let knownCount = 0;
+    let edgeCount = 0;
     function flush() {
         if (nodes.length || edges.length) {
             emit(N.batch(nodes, edges));
@@ -174,30 +183,39 @@ const RUNNER: &str = r#"
     const graph = freeze({
         add(value, options = {}) {
             const key = id(value);
-            if (known.has(key)) throw new ErrorType(`Duplicate node ID '${key}'`);
-            if (known.size >= 8192) throw new ErrorType('At most 8192 nodes are allowed');
+            if (setHas(known, key)) throw new ErrorType(`Duplicate node ID '${key}'`);
+            if (knownCount >= 8192) throw new ErrorType('At most 8192 nodes are allowed');
             push(nodes, stringifyCopy(N.node(key, options)));
-            known.add(key);
+            setAdd(known, key);
+            knownCount += 1;
             return key;
         },
-        ids() { return Array.from(known); },
+        ids() { return arrayFrom(known); },
         others(value) {
             const key = id(value);
-            return Array.from(known).filter(other => other !== key);
+            return filter(arrayFrom(known), other => other !== key);
         },
         connect(from, targets, options = {}) {
             const source = id(from);
-            const values = Array.isArray(targets) ? targets : [targets];
+            const values = isArray(targets) ? targets : [targets];
             if (options.id !== undefined && values.length > 1) {
                 throw new ErrorType('A custom edge ID can connect only one target');
             }
+            if (values.length > 250000 - edgeCount) {
+                throw new ErrorType('At most 250000 edges are allowed');
+            }
             const snapshot = stringifyCopy(options);
+            const targetIds = [];
+            for (let index = 0; index < values.length; index += 1) {
+                push(targetIds, id(values[index]));
+            }
             const added = [];
-            for (const value of values) {
-                const edge = N.edge(source, id(value), snapshot);
+            for (const target of targetIds) {
+                const edge = N.edge(source, target, snapshot);
                 edge.id = id(edge.id);
                 push(edges, edge);
                 push(added, edge.id);
+                edgeCount += 1;
             }
             return added;
         },
@@ -206,19 +224,20 @@ const RUNNER: &str = r#"
         setEdge(value, options = {}) { flush(); emit(N.setEdge(id(value), options)); },
         random: N.random
     });
-    const factory = new Function('N', 'params', 'graph', '"use strict";\n' + source +
-        '\n;if (typeof build === "function" && typeof generate === "function") throw new Error("Define build or generate, not both");' +
-        '\nif (typeof build === "function") return {builder:true,value:build(graph,params)};' +
-        '\nif (typeof generate === "function") return {builder:false,value:generate(N,params)};' +
+    const factory = new Function('N', 'params', '"use strict";\n' + source +
+        '\nif (typeof generate === "function") return {builder:false,entry:generate};' +
+        '\nif (typeof build === "function") return {builder:true,entry:build};' +
         '\nthrow new Error("Define function build(graph, p), or function* generate(N, params)");');
-    const result = factory(N, parameters, graph);
+    const result = factory(N, parameters);
+    const entry = result.entry;
     if (result.builder) {
-        if (result.value && (typeof result.value.then === 'function' || typeof result.value.next === 'function')) {
+        const value = entry(graph, parameters);
+        if (value && (typeof value.then === 'function' || typeof value.next === 'function')) {
             throw new ErrorType('build must be an ordinary synchronous function');
         }
         flush();
     } else {
-        const iterator = result.value;
+        const iterator = entry(N, parameters);
         if (!iterator || typeof iterator.next !== 'function') {
             throw new ErrorType('generate must return a synchronous generator');
         }
@@ -453,6 +472,78 @@ mod tests {
     }
 
     #[test]
+    fn legacy_generator_can_use_an_unrelated_build_helper() {
+        let source = r#"
+            function build(value) { return `node:${value}`; }
+            function* generate(N, params) {
+                for (const value of params.values) {
+                    yield N.batch([N.node(build(value))]);
+                }
+            }
+        "#;
+        let plan = compile_source(source, json!({"values":["a","b"]}), 1).unwrap();
+        let ids = plan
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Batch { nodes, .. } => Some(nodes[0].id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["node:a", "node:b"]);
+    }
+
+    #[test]
+    fn legacy_generator_can_bind_graph_in_its_own_source_scope() {
+        let source = r#"
+            const graph = ['left', 'right'];
+            function* generate(N) {
+                yield N.batch(graph.map(id => N.node(id)));
+            }
+        "#;
+        let plan = compile_source(source, json!({}), 1).unwrap();
+        let Event::Batch { nodes, .. } = &plan.events[0] else {
+            panic!("expected node batch");
+        };
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            ["left", "right"]
+        );
+    }
+
+    #[test]
+    fn builder_uses_captured_intrinsics_for_snapshots_arrays_and_duplicate_checks() {
+        let source = r#"
+            JSON.parse = () => ({ id: 'corrupted' });
+            Array.isArray = () => false;
+            Set.prototype.has = () => false;
+            function build(graph) {
+                graph.add('a');
+                graph.add('b');
+                graph.connect('b', ['a']);
+            }
+        "#;
+        let plan = compile_source(source, json!({}), 1).unwrap();
+        assert_eq!((plan.node_count, plan.edge_count), (2, 1));
+        let Event::Batch { nodes, edges } = &plan.events[0] else {
+            panic!("expected graph batch");
+        };
+        assert_eq!(nodes[0].id, "a");
+        assert_eq!(edges[0].target, "a");
+
+        let duplicate = r#"
+            Set.prototype.has = () => false;
+            function build(graph) { graph.add('same'); graph.add('same'); }
+        "#;
+        assert!(compile_source(duplicate, json!({}), 1)
+            .unwrap_err()
+            .contains("Duplicate node ID"));
+    }
+
+    #[test]
     fn build_styles_edits_numeric_ids_and_snapshots() {
         let source = r#"function build(graph) {
             const opts = {color:'#ff0000',position:[1,2]};
@@ -533,7 +624,6 @@ mod tests {
             "function build(g) { g.add(1); g.add(2); g.connect(1,[1,2],{id:'same'}); }",
             "async function build(g) { g.add(1); }",
             "function* build(g) { g.add(1); }",
-            "function build() {} function* generate() {}",
         ] {
             assert!(compile_source(source, json!({}), 1).is_err(), "{source}");
         }

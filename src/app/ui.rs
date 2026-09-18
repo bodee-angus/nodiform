@@ -177,7 +177,7 @@ impl NodiformApp {
         let enabled = !self.busy();
         egui::SidePanel::left("rules")
             .resizable(true)
-            .default_width(570.0)
+            .default_width((ctx.screen_rect().width() * 0.38).clamp(420.0, 570.0))
             .width_range(420.0..=900.0)
             .frame(egui::Frame::new().fill(SURFACE).inner_margin(egui::Margin {
                 left: 22,
@@ -280,7 +280,13 @@ impl NodiformApp {
                 ui.add_space(6.0);
                 let available = egui::vec2(
                     ui.available_width(),
-                    (ui.available_height() - 123.0).max(150.0),
+                    (ui.available_height()
+                        - if ui.available_width() < 600.0 {
+                            167.0
+                        } else {
+                            123.0
+                        })
+                    .max(150.0),
                 );
                 let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
                 ui.painter().rect_filled(rect, 24, CANVAS);
@@ -315,8 +321,9 @@ impl NodiformApp {
                     );
                 }
                 ui.add_space(10.0);
+                let narrow = ui.available_width() < 600.0;
                 card().show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
+                    ui.horizontal(|ui| {
                         for (number, label) in [
                             (self.graph.nodes.len() as u64, "Nodes"),
                             (self.graph.edges.len() as u64, "Edges"),
@@ -330,40 +337,49 @@ impl NodiformApp {
                             });
                             ui.add_space(22.0);
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add_enabled(self.busy(), button("Stop")).clicked() {
-                                self.stop();
-                            }
-                            if ui
-                                .add_enabled(
-                                    self.paused
-                                        && self.pending_frame.is_none()
-                                        && !self.finishing
-                                        && self.timeline.as_ref().is_some_and(|t| !t.finished()),
-                                    button("Step"),
-                                )
-                                .on_hover_text("Advance one output-frame interval")
-                                .clicked()
-                            {
-                                if let Err(error) = self.advance_frame() {
-                                    self.error = Some(error);
-                                    self.stop();
-                                }
-                            }
-                            if ui
-                                .add_enabled(
-                                    self.timeline.as_ref().is_some_and(|t| !t.finished())
-                                        && !self.finishing,
-                                    button(if self.paused { "Resume" } else { "Pause" }),
-                                )
-                                .clicked()
-                            {
-                                self.paused = !self.paused;
-                            }
-                        });
+                        if !narrow {
+                            self.transport(ui);
+                        }
                     });
+                    if narrow {
+                        ui.add_space(5.0);
+                        self.transport(ui);
+                    }
                 });
             });
+    }
+
+    fn transport(&mut self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add_enabled(self.busy(), button("Stop")).clicked() {
+                self.stop();
+            }
+            if ui
+                .add_enabled(
+                    self.paused
+                        && self.pending_frame.is_none()
+                        && !self.finishing
+                        && self.timeline.as_ref().is_some_and(|t| !t.finished()),
+                    button("Step"),
+                )
+                .on_hover_text("Advance one output-frame interval")
+                .clicked()
+            {
+                if let Err(error) = self.advance_frame() {
+                    self.error = Some(error);
+                    self.stop();
+                }
+            }
+            if ui
+                .add_enabled(
+                    self.timeline.as_ref().is_some_and(|t| !t.finished()) && !self.finishing,
+                    button(if self.paused { "Resume" } else { "Pause" }),
+                )
+                .clicked()
+            {
+                self.paused = !self.paused;
+            }
+        });
     }
 
     pub(super) fn status_bar(&self, ctx: &egui::Context) {
@@ -409,11 +425,29 @@ impl NodiformApp {
             return;
         }
         let mut open = self.show_settings;
-        egui::Window::new("Settings").open(&mut open).resizable(false).default_width(390.0).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 90.0)).show(ctx, |ui| {
-            egui::ScrollArea::vertical().max_height((ctx.screen_rect().height() - 160.0).max(240.0)).show(ui, |ui| {
+        let mut done = false;
+        egui::Window::new("Settings").open(&mut open).title_bar(false).resizable(false).frame(card().inner_margin(20)).default_width(390.0).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 90.0)).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Settings").size(22.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(egui::RichText::new("Done").color(ACCENT)).clicked() { done = true; }
+                });
+            });
+            ui.add_space(12.0);
+            egui::ScrollArea::vertical().max_height((ctx.screen_rect().height() - 235.0).max(200.0)).show(ui, |ui| {
                 ui.label(egui::RichText::new("Appearance").strong());
                 let recording = self.pending_run.as_ref().is_some_and(|(intent, _)| *intent == Intent::Record) || self.recorder.is_some() || self.recorder_start.is_some() || self.finishing;
-                if ui.add_enabled(!recording, egui::Checkbox::new(&mut self.project.size_by_connections, "Size nodes by connections")).changed() {
+                let sizing_changed = ui.add_enabled_ui(!recording, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Size nodes by connections");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            crate::inputs::switch(ui, &mut self.project.size_by_connections, "Size nodes by connections")
+                                .on_hover_text("Obsidian’s square-root growth, without its upper size cap.")
+                                .changed()
+                        }).inner
+                    }).inner
+                }).inner;
+                if sizing_changed {
                     self.gpu.set_degree_sizing(self.project.size_by_connections);
                     if let Some((_, snapshot)) = &mut self.pending_run {
                         snapshot.size_by_connections = self.project.size_by_connections;
@@ -453,7 +487,7 @@ impl NodiformApp {
                 ui.label(egui::RichText::new(format!("Nodiform {} · Experimental alpha", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED));
             });
         });
-        self.show_settings = open;
+        self.show_settings = open && !done;
     }
 
     pub(super) fn inspector_window(&mut self, ctx: &egui::Context) {

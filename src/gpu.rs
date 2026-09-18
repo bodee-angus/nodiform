@@ -378,6 +378,9 @@ impl GpuGraph {
         if self.degree_sizing != enabled {
             self.degree_sizing = enabled;
             self.write_display_styles();
+            // A deliberate appearance change should refit immediately even
+            // while idle; normal simulation frames retain smooth contraction.
+            self.reset_camera();
         }
     }
 
@@ -1284,6 +1287,7 @@ mod tests {
         assert!(pixels.iter().all(|pixel| pixel[3] == 255));
         assert!(pixels.iter().any(|pixel| pixel != &pixels[0]));
         let camera = read_camera(&gpu);
+        let base_camera = camera;
         for (position, node) in positions.iter().zip(&dense.nodes) {
             assert!((position[0] - camera[0]).abs() + node.radius <= camera[2]);
             assert!((position[1] - camera[1]).abs() + node.radius <= camera[3]);
@@ -1302,6 +1306,12 @@ mod tests {
         assert_eq!(positions, gpu.read_positions(500).unwrap());
         gpu.set_degree_sizing(false);
         assert!(read_style_radii(&gpu).iter().all(|radius| *radius == 0.3));
+        gpu.render(320, 180);
+        assert_eq!(
+            read_camera(&gpu),
+            base_camera,
+            "An idle sizing toggle must refit in one render"
+        );
         eprintln!(
             "Dense graph validation: 500 nodes, 124750 edges, finite dynamics and rendered frame"
         );

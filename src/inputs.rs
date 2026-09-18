@@ -29,13 +29,28 @@ pub fn show(ui: &mut egui::Ui, source: &str, parameters_text: &mut String, enabl
                 let reveal_json;
                 match (&controls, parsed) {
                     (Ok(controls), Ok(mut values)) if values.is_object() => {
+                        let stored_input_count = values.as_object().unwrap().len();
                         if controls.is_empty() {
                             card(ui, |ui| {
-                                ui.label(RichText::new("Everything starts in the rules").strong());
-                                secondary(ui, "This script does not declare any inputs. Define values in the editor, or use Insert → Optional controls to expose the values you want to adjust here.");
+                                if stored_input_count == 0 {
+                                    ui.label(
+                                        RichText::new("Everything starts in the rules").strong(),
+                                    );
+                                    secondary(ui, "This script does not declare any inputs. Define values in the editor, or use Insert → Optional controls to expose the values you want to adjust here.");
+                                } else {
+                                    ui.label(RichText::new("Stored inputs are available").strong());
+                                    secondary(
+                                        ui,
+                                        &format!(
+                                            "{stored_input_count} stored {} from this metadata-free script can be edited in Advanced Input JSON below.",
+                                            if stored_input_count == 1 { "input" } else { "inputs" }
+                                        ),
+                                    );
+                                }
                             });
                         }
-                        reveal_json = validate_parameters(controls, &values).is_err();
+                        reveal_json = (controls.is_empty() && stored_input_count > 0)
+                            || validate_parameters(controls, &values).is_err();
                         let mut changed = false;
                         // Source is part of the ID so switching scripts never reuses an
                         // unfinished text or JSON draft from a different experiment.
@@ -44,11 +59,11 @@ pub fn show(ui: &mut egui::Ui, source: &str, parameters_text: &mut String, enabl
                                 for (name, spec) in controls {
                                     let explicit = values.get(name).is_some();
                                     let current = values.get(name).unwrap_or(&spec.default);
-                                    let replacement = ui.push_id(name, |ui| {
+                                    let action = ui.push_id(name, |ui| {
                                         control_card(ui, name, spec, current, explicit)
                                     }).inner;
-                                    if let Some(value) = replacement {
-                                        values.as_object_mut().unwrap().insert(name.clone(), value);
+                                    if let Some(action) = action {
+                                        apply_action(&mut values, name, action);
                                         changed = true;
                                     }
                                     ui.add_space(2.0);
@@ -101,7 +116,7 @@ fn control_card(
     spec: &ControlSpec,
     current: &Value,
     explicit: bool,
-) -> Option<Value> {
+) -> Option<ControlAction> {
     card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&spec.label).size(14.0).strong());
@@ -113,11 +128,11 @@ fn control_card(
             secondary(ui, description);
         }
         let validation = validate_value(spec, current);
-        let mut replacement = if compatible_type(spec.kind, current) {
-            field(ui, spec, current)
+        let mut action = if compatible_type(spec.kind, current) {
+            field(ui, spec, current, explicit)
         } else {
             secondary(ui, "The saved value has a different type. Edit Input JSON below, or explicitly use the script's default.");
-            ui.button("Use default").clicked().then(|| spec.default.clone())
+            ui.button("Use default").clicked().then_some(ControlAction::Clear)
         };
         if let Err(error) = validation {
             ui.label(RichText::new(format!("{name}: {error}")).size(12.0).color(ERROR));
@@ -125,14 +140,33 @@ fn control_card(
         if explicit {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("params.{name}")).monospace().size(11.0).color(SECONDARY));
-                // This is an explicit action. No field is reset while rendering.
                 if ui.small_button("Reset value").on_hover_text("Use the default declared in this script.").clicked() {
-                    replacement = Some(spec.default.clone());
+                    action = Some(ControlAction::Clear);
                 }
             });
         }
-        replacement
+        action
     }).inner
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ControlAction {
+    Set(Value),
+    Clear,
+}
+
+fn apply_action(values: &mut Value, name: &str, action: ControlAction) {
+    let values = values
+        .as_object_mut()
+        .expect("input actions are applied only to parameter objects");
+    match action {
+        ControlAction::Set(value) => {
+            values.insert(name.to_owned(), value);
+        }
+        ControlAction::Clear => {
+            values.remove(name);
+        }
+    }
 }
 
 fn compatible_type(kind: ControlKind, value: &Value) -> bool {
@@ -144,8 +178,13 @@ fn compatible_type(kind: ControlKind, value: &Value) -> bool {
     }
 }
 
-fn field(ui: &mut egui::Ui, spec: &ControlSpec, current: &Value) -> Option<Value> {
-    match spec.kind {
+fn field(
+    ui: &mut egui::Ui,
+    spec: &ControlSpec,
+    current: &Value,
+    explicit: bool,
+) -> Option<ControlAction> {
+    let replacement = match spec.kind {
         ControlKind::Integer | ControlKind::Number => {
             let mut number = current.as_f64().unwrap();
             let step = spec.step.unwrap_or(if spec.kind == ControlKind::Integer {
@@ -181,39 +220,8 @@ fn field(ui: &mut egui::Ui, spec: &ControlSpec, current: &Value) -> Option<Value
                 .inner;
             response.changed().then_some(Value::Bool(value))
         }
-        ControlKind::Text => {
-            let mut value = current.as_str().unwrap().to_owned();
-            ui.add(egui::TextEdit::singleline(&mut value).desired_width(f32::INFINITY))
-                .changed()
-                .then_some(Value::String(value))
-        }
-        ControlKind::Color => {
-            let mut value = current.as_str().unwrap().to_owned();
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                if let Ok(color) = crate::model::parse_color(&value) {
-                    let mut channels = color.map(|channel| (channel * 255.0).round() as u8);
-                    if ui
-                        .color_edit_button_srgba_unmultiplied(&mut channels)
-                        .changed()
-                    {
-                        value = format!(
-                            "#{:02x}{:02x}{:02x}{:02x}",
-                            channels[0], channels[1], channels[2], channels[3]
-                        );
-                        changed = true;
-                    }
-                }
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut value)
-                            .hint_text("#RRGGBB or #RRGGBBAA")
-                            .desired_width(ui.available_width()),
-                    )
-                    .changed();
-            });
-            changed.then_some(Value::String(value))
-        }
+        ControlKind::Text => string_field(ui, spec, current, explicit, false),
+        ControlKind::Color => string_field(ui, spec, current, explicit, true),
         ControlKind::Select => {
             let mut value = current.as_str().unwrap().to_owned();
             let mut changed = false;
@@ -229,24 +237,119 @@ fn field(ui: &mut egui::Ui, spec: &ControlSpec, current: &Value) -> Option<Value
                 });
             changed.then_some(Value::String(value))
         }
-        ControlKind::Json => json_field(ui, current),
-    }
+        ControlKind::Json => json_field(ui, current, explicit),
+    };
+    replacement
+        .filter(|value| validate_value(spec, value).is_ok())
+        .map(ControlAction::Set)
 }
 
 #[derive(Clone)]
-struct JsonDraft {
+struct FieldDraft {
     observed: String,
+    observed_explicit: bool,
     text: String,
 }
 
-fn json_field(ui: &mut egui::Ui, current: &Value) -> Option<Value> {
+impl FieldDraft {
+    fn observes(&self, value: &str, explicit: bool) -> bool {
+        self.observed == value && self.observed_explicit == explicit
+    }
+}
+
+fn string_field(
+    ui: &mut egui::Ui,
+    spec: &ControlSpec,
+    current: &Value,
+    explicit: bool,
+    color: bool,
+) -> Option<Value> {
+    let id = ui.make_persistent_id(if color { "color-draft" } else { "text-draft" });
+    let stored = current.as_str().unwrap();
+    let mut draft = ui
+        .data(|data| data.get_temp::<FieldDraft>(id))
+        .filter(|draft| draft.observes(stored, explicit))
+        .unwrap_or_else(|| FieldDraft {
+            observed: stored.to_owned(),
+            observed_explicit: explicit,
+            text: stored.to_owned(),
+        });
+    let changed = if color {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            if let Ok(value) = crate::model::parse_color(&draft.text)
+                .or_else(|_| crate::model::parse_color(stored))
+            {
+                let mut channels = value.map(|channel| (channel * 255.0).round() as u8);
+                if ui
+                    .color_edit_button_srgba_unmultiplied(&mut channels)
+                    .changed()
+                {
+                    draft.text = format!(
+                        "#{:02x}{:02x}{:02x}{:02x}",
+                        channels[0], channels[1], channels[2], channels[3]
+                    );
+                    changed = true;
+                }
+            }
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut draft.text)
+                        .hint_text("#RRGGBB or #RRGGBBAA")
+                        .desired_width(ui.available_width()),
+                )
+                .changed();
+        });
+        changed
+    } else {
+        ui.add(egui::TextEdit::singleline(&mut draft.text).desired_width(f32::INFINITY))
+            .changed()
+    };
+    let edited = draft.text != stored;
+    let replacement = match validate_string_draft(spec, &mut draft, changed) {
+        Ok(value) => value,
+        Err(error) => {
+            if edited {
+                ui.label(
+                    RichText::new(format!(
+                        "Not applied: {error}. Correct this value to update the input."
+                    ))
+                    .size(12.0)
+                    .color(ERROR),
+                );
+            }
+            None
+        }
+    };
+    ui.data_mut(|data| data.insert_temp(id, draft));
+    replacement
+}
+
+fn validate_string_draft(
+    spec: &ControlSpec,
+    draft: &mut FieldDraft,
+    changed: bool,
+) -> Result<Option<Value>, String> {
+    let value = Value::String(draft.text.clone());
+    validate_value(spec, &value)?;
+    if changed {
+        draft.observed.clone_from(&draft.text);
+        draft.observed_explicit = true;
+        Ok(Some(value))
+    } else {
+        Ok(None)
+    }
+}
+
+fn json_field(ui: &mut egui::Ui, current: &Value, explicit: bool) -> Option<Value> {
     let id = ui.make_persistent_id("json-draft");
     let stored = serde_json::to_string_pretty(current).unwrap();
     let mut draft = ui
-        .data(|data| data.get_temp::<JsonDraft>(id))
-        .filter(|draft| draft.observed == stored)
-        .unwrap_or_else(|| JsonDraft {
+        .data(|data| data.get_temp::<FieldDraft>(id))
+        .filter(|draft| draft.observes(&stored, explicit))
+        .unwrap_or_else(|| FieldDraft {
             observed: stored.clone(),
+            observed_explicit: explicit,
             text: stored,
         });
     let response = ui.add(
@@ -259,6 +362,7 @@ fn json_field(ui: &mut egui::Ui, current: &Value) -> Option<Value> {
     match serde_json::from_str::<Value>(&draft.text) {
         Ok(value) if response.changed() => {
             draft.observed = serde_json::to_string_pretty(&value).unwrap();
+            draft.observed_explicit = true;
             replacement = Some(value);
         }
         Err(error) => {
@@ -276,7 +380,7 @@ fn json_field(ui: &mut egui::Ui, current: &Value) -> Option<Value> {
     replacement
 }
 
-fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
+pub(crate) fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
     let (rect, mut response) = ui.allocate_exact_size(egui::vec2(44.0, 26.0), egui::Sense::click());
     if response.clicked() {
         *value = !*value;
@@ -334,6 +438,7 @@ fn issue(ui: &mut egui::Ui, title: &str, detail: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn render(context: &egui::Context, source: &str, parameters: &mut String) -> Vec<String> {
         let output = context.run(egui::RawInput::default(), |context| {
@@ -371,6 +476,19 @@ mod tests {
     }
 
     #[test]
+    fn metadata_free_scripts_reveal_existing_custom_inputs() {
+        let context = egui::Context::default();
+        let source = "function build(graph, p) { graph.add(p.firstNode); }";
+        let mut parameters = r#"{"firstNode":"legacy","weights":[1,2]}"#.to_owned();
+        let before = parameters.clone();
+        let text = render(&context, source, &mut parameters).join("\n");
+        assert!(text.contains("Stored inputs are available"), "{text}");
+        assert!(text.contains("2 stored inputs"), "{text}");
+        assert!(text.contains("firstNode"), "{text}");
+        assert_eq!(parameters, before);
+    }
+
+    #[test]
     fn invalid_values_metadata_and_json_remain_untouched_and_visible() {
         let source =
             r#"/* @controls {"flux":{"type":"number","label":"Flux setting","default":0.25}} */"#;
@@ -394,5 +512,79 @@ mod tests {
             assert!(text.contains(expected), "{text}");
             assert_eq!(parameters, stored);
         }
+    }
+
+    #[test]
+    fn clear_action_removes_override_so_source_default_can_change() {
+        let mut values = json!({"count": 9, "opaque": {"keep": true}});
+        apply_action(&mut values, "count", ControlAction::Clear);
+        assert_eq!(values, json!({"opaque": {"keep": true}}));
+
+        let first = crate::experiment::parse_controls(
+            r#"/* @controls {"count":{"type":"integer","label":"Count","default":3}} */"#,
+        )
+        .unwrap();
+        let second = crate::experiment::parse_controls(
+            r#"/* @controls {"count":{"type":"integer","label":"Count","default":12}} */"#,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::experiment::merge_defaults(&first, &values).unwrap()["count"],
+            3
+        );
+        assert_eq!(
+            crate::experiment::merge_defaults(&second, &values).unwrap()["count"],
+            12
+        );
+
+        apply_action(&mut values, "count", ControlAction::Set(json!(7)));
+        assert_eq!(values["count"], 7);
+        assert_eq!(values["opaque"], json!({"keep": true}));
+    }
+
+    #[test]
+    fn invalid_string_drafts_stay_visible_without_becoming_parameters() {
+        let controls = crate::experiment::parse_controls(
+            r##"/* @controls {
+                "tint":{"type":"color","label":"Tint","default":"#112233"},
+                "title":{"type":"text","label":"Title","default":"short"}
+            } */"##,
+        )
+        .unwrap();
+
+        let mut color = FieldDraft {
+            observed: "#112233".into(),
+            observed_explicit: true,
+            text: "#f".into(),
+        };
+        let mut values = json!({"tint":"#112233"});
+        let invalid = validate_string_draft(&controls["tint"], &mut color, true);
+        assert!(invalid.is_err());
+        if let Ok(Some(value)) = invalid {
+            apply_action(&mut values, "tint", ControlAction::Set(value));
+        }
+        assert_eq!(values["tint"], "#112233");
+        assert_eq!(color.observed, "#112233");
+        assert_eq!(color.text, "#f");
+        assert!(color.observes("#112233", true));
+        assert!(!color.observes("#112233", false));
+
+        color.text = "#abcdef".into();
+        let corrected = validate_string_draft(&controls["tint"], &mut color, true)
+            .unwrap()
+            .unwrap();
+        apply_action(&mut values, "tint", ControlAction::Set(corrected));
+        assert_eq!(values["tint"], "#abcdef");
+        assert_eq!(color.observed, "#abcdef");
+        assert!(color.observed_explicit);
+
+        let mut text = FieldDraft {
+            observed: "short".into(),
+            observed_explicit: true,
+            text: "x".repeat(16_385),
+        };
+        assert!(validate_string_draft(&controls["title"], &mut text, true).is_err());
+        assert_eq!(text.observed, "short");
+        assert_eq!(text.text.len(), 16_385);
     }
 }

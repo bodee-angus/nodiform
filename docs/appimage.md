@@ -1,13 +1,13 @@
 # Install Nodiform on Bazzite
 
-Nodiform 0.1.1 is an **experimental alpha** for x86_64 Linux. The AppImage gives it a self-contained application file, desktop-menu entry, and a Gear Lever update source. Experiments and recordings stay outside the application file. This packaging does not sandbox Nodiform or change its alpha status.
+Nodiform 0.1.2 is an **experimental alpha** for x86_64 Linux. The AppImage gives it a self-contained application file, desktop-menu entry, and a Gear Lever update source. Experiments and recordings stay outside the application file. This packaging does not sandbox Nodiform or change its alpha status.
 
 ## Install with Gear Lever
 
 1. Open **Bazaar**, search for **Gear Lever**, and install it. This is Bazzite's recommended AppImage manager. [Bazzite guide](https://docs.bazzite.gg/Installing_and_Managing_Software/AppImage/)
 2. Download **[Nodiform-x86_64.AppImage](https://github.com/bodee-angus/nodiform/releases/latest/download/Nodiform-x86_64.AppImage)** from [Nodiform's latest release](https://github.com/bodee-angus/nodiform/releases/latest).
 3. Open Gear Lever and drag the downloaded file into its window, or open the file with Gear Lever from your file manager. Follow its prompts to integrate Nodiform into the application menu. Gear Lever can keep managed AppImages in a chosen folder, so the application need not remain in Downloads. [Gear Lever features](https://github.com/mijorus/gearlever#features)
-4. Search for **Nodiform** in your desktop's application launcher. Try **Preview** with the included ABC experiment.
+4. Search for **Nodiform** in your desktop's application launcher. Try **Preview** with the small chain shown in **Rules**. Other experiments are under **Experiment → Examples**.
 
 If execution is blocked by file permissions, enable executable permission in the AppImage's file properties and try again. After integration, confirm Gear Lever's managed copy launches before removing any duplicate download. Keep the managed file in place.
 
@@ -22,6 +22,8 @@ The AppImage runtime's upstream licence notice is included in [third-party/appim
 ## Apply updates
 
 Open Nodiform's entry in Gear Lever to check for and apply updates. When given a choice, replace the previous application version rather than keeping both to save space. Gear Lever manages the download and desktop integration; Nodiform does not install background updates itself. Bazzite notes that Gear Lever can check for updates, while applying them remains a user action. [Bazzite guide](https://docs.bazzite.gg/Installing_and_Managing_Software/AppImage/)
+
+Version 0.1.2 uses the same update channel as 0.1.1, so an existing Gear Lever installation does not need a new source configured. Older saved experiments and generator scripts remain supported. The new connection-based node sizing option starts off for projects that do not contain that setting.
 
 The AppImage embeds this update source:
 
@@ -42,7 +44,7 @@ The channel follows GitHub's latest regular release. Releases are labelled **Exp
 
 ### Your data stays separate
 
-**Save** writes a `.nodiform.json` experiment wherever you choose. Recordings default to `Videos/Nodiform` under your home directory; you can choose another destination. Replacing the AppImage leaves these files alone. Removing Nodiform through Gear Lever also leaves your saved experiments and videos to manage separately.
+**Experiment → Save…** writes a `.nodiform.json` experiment wherever you choose. Recordings default to `Videos/Nodiform` under your home directory; **Settings → Choose video folder…** selects another destination. Replacing the AppImage leaves these files alone. Removing Nodiform through Gear Lever also leaves your saved experiments and videos to manage separately.
 
 Only saved experiments survive closing the app. An AppImage update does not preserve unsaved editor changes or a live simulation, so save your work and let recording finalisation finish before updating.
 

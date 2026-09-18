@@ -205,7 +205,12 @@ impl NodiformApp {
                 self.error = Some(error);
             }
             self.smoke_frame_checked = true;
-            self.paused = true;
+            // Keep the simulated graph, then draw one fully editable idle
+            // frame before capturing the actual interface.
+            self.stop();
+            self.status = "Preview checked. Your experiment is ready to edit.".into();
+            ctx.request_repaint();
+            return;
         }
         if self.error.is_none() {
             match self.smoke_probe.as_mut().unwrap().capture(ctx) {
@@ -307,11 +312,16 @@ impl NodiformApp {
             return Ok(());
         }
         if intent == Intent::Record {
+            let effective_parameters = crate::experiment::merge_defaults(
+                &crate::experiment::parse_controls(&snapshot.source)?,
+                &snapshot.parameters,
+            )?;
             let metadata = json!({
                 "app_version":env!("CARGO_PKG_VERSION"), "project":snapshot,
                 "source_sha256":format!("{:x}", Sha256::digest(snapshot.source.as_bytes())),
                 "adapter":self.adapter, "force_profile":"nodiform-exact-v1",
                 "rule_api":crate::rules::RULE_API_VERSION,
+                "effective_parameters": effective_parameters,
                 "node_size_rule":if snapshot.size_by_connections { "obsidian-global-sqrt-uncapped-v1" } else { "rule-radius" },
                 "forces":{"repulsion":64,"softening_squared":0.25,"rest_length":0,"gravity":0,"max_displacement":2,"step_policy":"min(1/120,0.5/max_incident_strength)"},
                 "birth_placement":crate::model::BIRTH_PLACEMENT_VERSION,
@@ -680,12 +690,24 @@ mod tests {
     use super::*;
     #[test]
     fn project_round_trip() {
-        let original = Project::default();
+        let original = Project {
+            size_by_connections: true,
+            ..Project::default()
+        };
         let saved = serde_json::to_string(&original).unwrap();
         let restored: Project = serde_json::from_str(&saved).unwrap();
         validate_project(&restored).unwrap();
         assert_eq!(original.source, restored.source);
         assert_eq!(original.parameters, restored.parameters);
+        assert!(restored.size_by_connections);
+    }
+    #[test]
+    fn older_projects_keep_fixed_rule_radii_by_default() {
+        let mut value = serde_json::to_value(Project::default()).unwrap();
+        value.as_object_mut().unwrap().remove("size_by_connections");
+        let restored: Project = serde_json::from_value(value).unwrap();
+        assert!(!restored.size_by_connections);
+        validate_project(&restored).unwrap();
     }
     #[test]
     fn reject_invalid_timing() {

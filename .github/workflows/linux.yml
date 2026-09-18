@@ -70,6 +70,7 @@ jobs:
           NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/rules.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_EXAMPLE=complete NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/inputs.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_EXAMPLE=complete NODIFORM_SMOKE_DEGREE=1 NODIFORM_SMOKE_SETTINGS=1 NODIFORM_SMOKE_COMPACT=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/compact-settings.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+          NODIFORM_SMOKE_COMPACT=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/compact-rules.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
 
       - name: Upload native interface captures
         uses: actions/upload-artifact@v4

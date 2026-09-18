@@ -23,7 +23,7 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential pkg-config libxkbcommon-dev libwayland-dev libx11-dev libudev-dev ffmpeg mesa-vulkan-drivers xvfb xauth desktop-file-utils zsync
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libx11-dev libudev-dev ffmpeg mesa-vulkan-drivers xvfb xauth desktop-file-utils zsync
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable

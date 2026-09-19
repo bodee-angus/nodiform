@@ -21,6 +21,9 @@ mod toroidal_tests;
 mod grid_tests;
 
 #[cfg(test)]
+mod ring_lattice_tests;
+
+#[cfg(test)]
 mod colour_a_tests;
 
 #[cfg(test)]

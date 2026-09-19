@@ -1,5 +1,11 @@
 # Release changes
 
+## 0.1.10
+
+- Added **Ring lattice**, with **Node Count** and **Previous Node Connect Count** inputs. Numbered nodes connect to their preceding neighbours around a cyclic sequence. With 10 nodes and 2 predecessors, the graph has 20 unique edges, including 9–1, 10–1 and 10–2.
+- Wraparound edges appear with the later endpoint's birth. Self-connections and duplicate undirected edges are omitted; zero predecessors creates isolated nodes, and counts covering all other nodes produce a complete graph.
+- Includes birth-order and ring-distance rainbow colours, gradient edges, connection strength, birth timing and final settling controls. No fixed node-count ceiling is introduced. The existing Gear Lever update channel continues to work.
+
 ## 0.1.9
 
 - Edges now retain a minimum screen width when zoomed out: one physical pixel at the default thickness. The existing slider scales both world width and the pixel floor. Analytic antialiasing, gradients and opacity apply in previews and videos; nodes continue to scale with zoom.

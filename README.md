@@ -2,7 +2,7 @@
 
 A native laboratory for emergent graphs. Write rules, choose the order in which a graph grows, and watch its structure develop in two dimensions.
 
-Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.8 adds adjustable edge thickness, preview and recording progress, colour modes for every example, and a Fibonacci-chain experiment. Palettes follow rainbow hue order at the strongest common chroma that fits sRGB while keeping perceptual lightness and chroma equal. GPU storage grows with the graph without fixed node and edge caps; available memory and the GPU’s actual buffer and indexing limits still determine what can run. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
+Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.9 keeps zoomed-out edges visible with a minimum pixel width, adds adaptive time-remaining estimates, and introduces a nonwrapping Grid experiment. Palettes follow rainbow hue order at the strongest common chroma that fits sRGB while keeping perceptual lightness and chroma equal. GPU storage grows with the graph without fixed node and edge caps; available memory and the GPU’s actual buffer and indexing limits still determine what can run. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
 
 ## What this version does
 
@@ -12,8 +12,8 @@ Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. 
 - Applies code-defined colours, world-space node radii, and edge strengths, including changes later in a run.
 - Generates hex palettes with similar vividness, varying only hue in OKLCH before conversion to sRGB, with `graph.palette(count)` or `N.palette(count)`.
 - Blends gradient edges between their endpoint colours, following later node colour changes.
-- Adjusts edge thickness for preview and video without changing attraction strength.
-- Shows timeline progress through node births, intervening waits, and final settling in preview and recording.
+- Adjusts antialiased edge thickness for preview and video, with a minimum screen width when zoomed out, without changing attraction strength.
+- Shows timeline progress and estimated time remaining through node births, intervening waits, and final settling in preview and recording.
 - Places each new node near its already-created neighbours using their current positions, or near the world origin when none exist. Scripts can override the initial position.
 - Calculates repulsion and weighted attraction on the GPU, with damped momentum, and renders the graph on the GPU.
 - Fits the whole graph into the view. Nodes become smaller on screen as the camera zooms out.
@@ -21,9 +21,11 @@ Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. 
 - Offers **Preview** at the canvas’s physical pixel resolution and **Record** at an independent output resolution; recording streams fixed-timeline video to FFmpeg.
 - Optionally sizes nodes by connection count without changing the simulation's forces.
 
-The default experiment is a small eight-node chain with optional colour inputs. **Experiment → Examples** contains **Connect to every earlier node**, **Connect to the previous half**, **Letter permutations**, **Growing ring**, **Modular residues**, **Prime factors**, **Digits of pi**, **Divisor graph**, **Toroidal grid**, and **Fibonacci chain**. Both numbered growth examples default to 500 nodes: connecting to every earlier node creates 124,750 edges, while connecting to the previous half creates 62,500. These are editable experiments, not fixed application modes.
+The default experiment is a small eight-node chain with optional colour inputs. **Experiment → Examples** contains **Connect to every earlier node**, **Connect to the previous half**, **Letter permutations**, **Growing ring**, **Modular residues**, **Prime factors**, **Digits of pi**, **Divisor graph**, **Toroidal grid**, **Grid**, and **Fibonacci chain**. Both numbered growth examples default to 500 nodes: connecting to every earlier node creates 124,750 edges, while connecting to the previous half creates 62,500. These are editable experiments, not fixed application modes.
 
 **Toroidal grid** takes **Dimension** and **Range**. Each coordinate wraps back to 1, so dimension 1 makes a cycle and dimension 2 makes a grid with wrapped rows and columns. The default dimension 2 and range 10 produce 100 nodes and 200 edges. Higher logical dimensions add connections, while the force simulation and renderer remain 2D. Node colours identify the first coordinate by default; other colour modes are available in Inputs. See the [example rules](docs/rules.md#included-experiments-and-limits).
+
+**Grid** uses the same Dimension, Range and colour modes as Toroidal grid, with open boundaries. Dimension 1 and Range 10 create a path with 10 nodes and 9 edges; Dimension 2 and Range 10 create 100 nodes and 180 edges. Connections never wrap from Range back to 1. Its connectivity is a grid; positions still emerge from the 2D force simulation.
 
 **Fibonacci chain** uses **Maximum number** as an inclusive endpoint: 20 creates nodes 0 through 20. It first builds the sequential chain, then adds 3–5, 5–8, and 8–13. Repeated Fibonacci values and connections already in the chain are omitted.
 
@@ -33,7 +35,7 @@ Generated colours share one OKLCH lightness and chroma; only hue varies. Palette
 
 For letter permutations, choose **Inputs → Birth order → connected-branch-walk** to create each prefix before its descendants. With a maximum length of at least two, every node after the first connects to the existing graph at birth. The final graph is the same as with the other birth orders. See the [permutation examples](docs/rules.md#included-experiments-and-limits).
 
-The native egui interface offers **Settings → Appearance → System / Light / Dark**, with matching editor colours and controls. The theme is remembered separately from experiments and does not change recorded graph colours. Rounded cards and blue accents surround a pure black simulation canvas. **Settings → Appearance → Edge thickness** scales edge width from 0.25× to 8×. It can change during preview and is locked during recording. The value is saved in the project; older projects default to 1×.
+The native egui interface offers **Settings → Appearance → System / Light / Dark**, with matching editor colours and controls. The theme is remembered separately from experiments and does not change recorded graph colours. Rounded cards and blue accents surround a pure black simulation canvas. **Settings → Appearance → Edge thickness** scales edge width from 0.25× to 8×. It can change during preview and is locked during recording. The value is saved in the project; older projects default to 1×. At 1×, edges shrink with zoom until reaching one physical pixel, then retain that width. The slider scales both their world width and the pixel minimum. Nodes continue to shrink with zoom.
 
 ## Run the desktop app
 
@@ -62,7 +64,7 @@ The rule editor is the source of truth. Define `function build(graph, p)` and us
 
 Use **Experiment → Open…** and **Save…** to keep a `.nodiform.json` project containing the source, inputs, seed, and run/recording settings. This saves an experiment definition, not the current moving graph or a resume checkpoint. Older project files still open; connection-based sizing defaults to off if absent. **Choose video folder…** in Settings sets the recording destination; the default is `Videos/Nodiform` under your home directory, with a separate uniquely named folder for each run. Runs write `simulation.mkv` and `manifest.json`; `run-outcome.json` records whether the simulation completed its planned timeline or stopped early.
 
-The progress bar beneath the canvas counts all compiled script waits, including ticks between births and the script’s final settling, plus **Settings → Final settling ticks**. It measures simulation ticks, not estimated wall-clock time. Video finalisation is shown separately after the timeline reaches its end.
+The progress bar beneath the canvas counts all compiled script waits, including ticks between births and the script’s final settling, plus **Settings → Final settling ticks**. The percentage measures simulation ticks. After a short measurement period, the bar also shows approximate time remaining based on recent active playback speed, including rendering delays and encoder backpressure. The estimate adapts as the graph grows and excludes pauses. It is an estimate at the current pace, so later graph growth can make it optimistic. Video finalisation is shown separately because its remaining duration cannot be predicted from solver ticks.
 
 The initial app settings use 1280 × 720 video output at 60 fps, four solver ticks per frame, and 240 extra relaxation ticks after the generated plan. Preview targets 240 solver ticks per second with these settings, retaining fractional elapsed ticks between display refreshes. A slow frame has bounded catch-up work, so sustained overload slows playback instead of building an ever-growing queue.
 

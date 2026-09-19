@@ -18,6 +18,9 @@ mod example_tests;
 mod toroidal_tests;
 
 #[cfg(test)]
+mod grid_tests;
+
+#[cfg(test)]
 mod colour_a_tests;
 
 #[cfg(test)]

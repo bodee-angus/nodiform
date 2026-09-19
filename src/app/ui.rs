@@ -83,6 +83,7 @@ impl NodiformApp {
                                     ("pi", "Digits of pi"),
                                     ("divisors", "Divisor graph"),
                                     ("torus", "Toroidal grid"),
+                                    ("grid", "Grid"),
                                     ("fibonacci", "Fibonacci chain"),
                                 ] {
                                     if ui.button(label).clicked() {
@@ -333,14 +334,17 @@ impl NodiformApp {
                 "Preview"
             };
             let state = match progress.state {
-                RunState::Running if self.recorder_start.is_some() => "Preparing encoder",
-                RunState::Running if self.paused => "Paused",
-                RunState::Running => "Running",
-                RunState::Finalising => "Finalising video",
-                RunState::Complete => "Complete",
-                RunState::Stopped if self.recorder.is_some() => "Stopped · finalising video",
-                RunState::Stopped => "Stopped",
-                RunState::Failed => "Failed",
+                RunState::Running if self.recorder_start.is_some() => "Preparing encoder".into(),
+                RunState::Running if self.paused => "Paused".into(),
+                RunState::Running => progress
+                    .remaining()
+                    .map(playback::remaining_label)
+                    .unwrap_or_else(|| "Estimating…".into()),
+                RunState::Finalising => "Finalising video".into(),
+                RunState::Complete => "Complete".into(),
+                RunState::Stopped if self.recorder.is_some() => "Stopped · finalising video".into(),
+                RunState::Stopped => "Stopped".into(),
+                RunState::Failed => "Failed".into(),
             };
             let fraction = progress.fraction();
             (
@@ -378,7 +382,7 @@ impl NodiformApp {
         }
         if let Some(progress) = &self.progress {
             response.on_hover_text(format!(
-                "{} / {} simulation ticks. Includes every wait between node additions, the script’s final settling ticks, and the final settling ticks in Settings. Video finalisation finishes after the last frame has been encoded.",
+                "{} / {} simulation ticks. Includes every wait between node additions, the script’s final settling ticks, and the final settling ticks in Settings. Remaining time is approximate, based on recent active speed, and adjusts as the graph grows. Paused time is excluded. Final video encoding is shown separately because its remaining duration is unknown.",
                 progress.tick, progress.total_ticks
             ));
         }
@@ -420,7 +424,10 @@ impl NodiformApp {
                 )
                 .clicked()
             {
+                let now = Instant::now();
+                self.observe_progress_pace(now);
                 self.paused = !self.paused;
+                self.observe_progress_pace(now);
                 self.reset_preview_clock();
             }
         });
@@ -530,7 +537,7 @@ impl NodiformApp {
                         .suffix("×")
                         .logarithmic(true)
                         .max_decimals(2))
-                        .on_hover_text("Changes edge appearance in the preview and saved video. Edges still follow the zoom level.")
+                        .on_hover_text("Changes edge appearance in the preview and saved video. At 1×, edges stop shrinking at one physical pixel. The multiplier also changes this minimum width.")
                         .changed()
                 }).inner;
                 if thickness_changed {
@@ -541,7 +548,7 @@ impl NodiformApp {
                     self.preview_dirty = true;
                     ctx.request_repaint();
                 }
-                ui.label(egui::RichText::new("Appearance only. Set the thickness before starting a recording.").size(12.0).color(p.secondary));
+                ui.label(egui::RichText::new("Edges stop shrinking at one pixel at 1×. Set the thickness before recording.").size(12.0).color(p.secondary));
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_enabled_ui(!self.busy(), |ui| {
@@ -649,6 +656,7 @@ impl NodiformApp {
             "pi" => include_str!("../../examples/pi-digit-chain.js"),
             "divisors" => include_str!("../../examples/divisor-graph.js"),
             "torus" => include_str!("../../examples/toroidal-grid.js"),
+            "grid" => include_str!("../../examples/grid.js"),
             "fibonacci" => include_str!("../../examples/fibonacci-chain.js"),
             _ => include_str!("../../examples/starter.js"),
         };

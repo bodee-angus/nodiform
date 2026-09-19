@@ -248,12 +248,20 @@ impl NodiformApp {
             return;
         }
         let ready = probe.ready(self.tick, self.graph.nodes.len(), self.graph.edges.len());
+        let live_eta = std::env::var("NODIFORM_SMOKE_ETA").as_deref() == Ok("1");
+        let wait_for_estimate = live_eta
+            && !self.smoke_frame_checked
+            && self
+                .progress
+                .as_ref()
+                .and_then(playback::RunProgress::remaining)
+                .is_none();
         let wait_for_completion = std::env::var("NODIFORM_SMOKE_COMPLETE").as_deref() == Ok("1")
             && !self
                 .progress
                 .as_ref()
                 .is_some_and(|progress| progress.state == playback::RunState::Complete);
-        if (!ready || wait_for_completion) && self.error.is_none() {
+        if (!ready || wait_for_completion || wait_for_estimate) && self.error.is_none() {
             ctx.request_repaint_after(Duration::from_millis(8));
             return;
         }
@@ -265,13 +273,30 @@ impl NodiformApp {
             self.smoke_frame_checked = true;
             // Keep the simulated graph, then let idle controls and window
             // animations settle before capturing the actual interface.
-            self.stop();
-            self.smoke_idle_since = Some(Instant::now());
-            self.status = "Preview checked. Your experiment is ready to edit.".into();
+            if !live_eta {
+                self.stop();
+                self.smoke_idle_since = Some(Instant::now());
+                self.status = "Preview checked. Your experiment is ready to edit.".into();
+            }
             ctx.request_repaint();
             return;
         }
         if self.error.is_none() {
+            if live_eta && self.smoke_idle_since.is_none() {
+                // Capture a running estimate before stopping, then retain the
+                // usual guarantee that the encoder and manifest finish cleanly.
+                match self.smoke_probe.as_mut().unwrap().capture(ctx) {
+                    Ok(false) => {
+                        ctx.request_repaint();
+                        return;
+                    }
+                    Ok(true) => {
+                        self.stop();
+                        self.smoke_idle_since = Some(Instant::now());
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
             if self.recorder.is_some() {
                 // Do not report a successful recording smoke test until FFmpeg
                 // has encoded every queued frame and committed the manifest.
@@ -415,6 +440,9 @@ impl NodiformApp {
                 "effective_parameters": effective_parameters,
                 "node_size_rule":if snapshot.size_by_connections { "obsidian-global-sqrt-uncapped-v1" } else { "rule-radius" },
                 "edge_width_multiplier":snapshot.edge_width,
+                "edge_width_rule":"world-with-pixel-floor-v1",
+                "edge_minimum_physical_pixels":snapshot.edge_width,
+                "edge_base_world_width":0.18,
                 "forces":{"version":crate::model::FORCE_VERSION,"repulsion":crate::model::REPULSION,"default_edge_strength":crate::model::DEFAULT_EDGE_STRENGTH,"softening_squared":crate::model::SOFTENING_SQUARED,"rest_length":0,"gravity":0,"momentum_retention":crate::model::MOMENTUM_RETENTION,"max_displacement":crate::model::MAX_DISPLACEMENT,"base_timestep":crate::model::BASE_TIMESTEP,"step_policy":"min(base_timestep,0.5/max_incident_strength)"},
                 "birth_placement":crate::model::BIRTH_PLACEMENT_VERSION,
                 "ticks_per_frame":snapshot.ticks_per_frame,
@@ -453,6 +481,7 @@ impl NodiformApp {
         self.inspected_position = None;
         self.components = 0;
         self.reset_preview_clock();
+        self.observe_progress_pace(Instant::now());
         self.preview_dirty = true;
         self.status = if self.recorder.is_some() {
             "Recording every frame. Slower computation stretches wall time, not the movie."
@@ -559,6 +588,18 @@ impl NodiformApp {
     fn reset_preview_clock(&mut self) {
         self.last_sample = Instant::now();
         self.preview_clock.reset();
+    }
+
+    fn observe_progress_pace(&mut self, now: Instant) {
+        let active = !self.paused
+            && !self.finishing
+            && self
+                .timeline
+                .as_ref()
+                .is_some_and(|timeline| !timeline.finished());
+        if let Some(progress) = &mut self.progress {
+            progress.observe_pace(now, active);
+        }
     }
 
     fn advance_ticks(&mut self, mut budget: u32) -> Result<(), String> {
@@ -803,6 +844,9 @@ impl eframe::App for NodiformApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Measuring before this update's work includes the previous update's
+        // rendering, GPU waits and any encoder backpressure in the observed pace.
+        self.observe_progress_pace(Instant::now());
         self.pump();
         if !self.busy()
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter))

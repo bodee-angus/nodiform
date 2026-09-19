@@ -92,6 +92,8 @@ jobs:
           outcome = json.loads(manifests[0].with_name("run-outcome.json").read_text())
           assert manifest["status"] == "complete", manifest
           assert manifest["metadata"]["edge_width_multiplier"] == 4
+          assert manifest["metadata"]["edge_width_rule"] == "world-with-pixel-floor-v1"
+          assert manifest["metadata"]["edge_minimum_physical_pixels"] == 4
           assert manifest["metadata"]["planned_ticks"] == 264
           assert manifest["frames"] == 66, manifest["frames"]
           assert outcome["status"] == "completed", outcome
@@ -99,6 +101,10 @@ jobs:
           assert (outcome["nodes"], outcome["edges"]) == (21, 23), outcome
           print("Recording completed: 264 ticks, 66 frames, 21 nodes, 23 edges, edge thickness 4×")
           PYVERIFY
+
+          NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=grid NODIFORM_SMOKE_PARAMETERS='{"dimensions":2,"range":10,"ticksPerNode":0,"finalTicks":24}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_COMPLETE=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-grid-complete.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+          NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=grid NODIFORM_SMOKE_PARAMETERS='{"dimensions":2,"range":10,"ticksPerNode":24,"finalTicks":240}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_COMPACT=1 NODIFORM_SMOKE_ETA=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-grid-preview-eta.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+          NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=grid NODIFORM_SMOKE_PARAMETERS='{"dimensions":2,"range":10,"ticksPerNode":24,"finalTicks":240,"colorBy":"birth-order"}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_INTENT=record NODIFORM_SMOKE_OUTPUT_DIR="$RUNNER_TEMP/nodiform-eta-video" NODIFORM_SMOKE_ETA=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-grid-render-eta.ppm" timeout 60s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
 
       - name: Upload native interface captures
         uses: actions/upload-artifact@v4

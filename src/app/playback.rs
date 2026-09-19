@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum RunState {
@@ -17,6 +17,7 @@ pub(super) struct RunProgress {
     pub(super) tick: u64,
     pub(super) state: RunState,
     simulation_finished: bool,
+    pace: RecentPace,
 }
 
 impl RunProgress {
@@ -27,6 +28,7 @@ impl RunProgress {
             tick: 0,
             state: RunState::Running,
             simulation_finished: false,
+            pace: RecentPace::default(),
         }
     }
 
@@ -61,6 +63,25 @@ impl RunProgress {
         }
     }
 
+    /// Sample whole update intervals, including drawing and encoder pressure.
+    /// A new baseline after a pause excludes both paused time and manual steps.
+    pub(super) fn observe_pace(&mut self, now: Instant, active: bool) {
+        self.pace
+            .observe(now, self.tick, active && self.state == RunState::Running);
+    }
+
+    pub(super) fn remaining(&self) -> Option<Duration> {
+        if self.state != RunState::Running || self.pace.last.is_none() {
+            return None;
+        }
+        let ticks = self.total_ticks.saturating_sub(self.tick);
+        if ticks == 0 {
+            // Trailing mutations and video finalisation have no tick-based ETA.
+            return None;
+        }
+        self.pace.remaining(ticks)
+    }
+
     pub(super) fn fraction(&self) -> f32 {
         if self.simulation_finished {
             1.0
@@ -72,6 +93,76 @@ impl RunProgress {
             (self.tick as f64 / self.total_ticks as f64).min(0.999) as f32
         }
     }
+}
+
+/// Time-weighted recent throughput. Samples include zero-tick stalls, rather
+/// than treating a slow encoder or GPU as time outside the simulation. A short
+/// memory lets the estimate adapt as a growing graph becomes more expensive.
+#[derive(Default)]
+struct RecentPace {
+    last: Option<(Instant, u64)>,
+    active_elapsed: Duration,
+    sample_elapsed: Duration,
+    sample_ticks: u64,
+    ticks_per_second: Option<f64>,
+}
+
+impl RecentPace {
+    fn observe(&mut self, now: Instant, tick: u64, active: bool) {
+        if !active {
+            self.last = None;
+            return;
+        }
+        if let Some((last, previous_tick)) = self.last {
+            let elapsed = now.saturating_duration_since(last);
+            self.active_elapsed += elapsed;
+            self.sample_elapsed += elapsed;
+            self.sample_ticks += tick.saturating_sub(previous_tick);
+            if self.sample_elapsed >= Duration::from_millis(500) {
+                let seconds = self.sample_elapsed.as_secs_f64();
+                let rate = self.sample_ticks as f64 / seconds;
+                // Four seconds is responsive to growth without flickering at
+                // individual frame boundaries. Long stalls carry full weight.
+                let weight = 1.0 - (-seconds / 4.0).exp();
+                self.ticks_per_second = Some(match self.ticks_per_second {
+                    Some(previous) => previous + weight * (rate - previous),
+                    None => rate,
+                });
+                self.sample_elapsed = Duration::ZERO;
+                self.sample_ticks = 0;
+            }
+        }
+        self.last = Some((now, tick));
+    }
+
+    fn remaining(&self, ticks: u64) -> Option<Duration> {
+        if self.active_elapsed < Duration::from_secs(1) {
+            return None;
+        }
+        let rate = self.ticks_per_second?;
+        if rate <= 0.0 || !rate.is_finite() {
+            return None;
+        }
+        Duration::try_from_secs_f64(ticks as f64 / rate).ok()
+    }
+}
+
+/// Round up so the active bar never promises zero seconds before completion.
+pub(super) fn remaining_label(duration: Duration) -> String {
+    let seconds = duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0))
+        .max(1);
+    let value = if seconds >= 86_400 {
+        format!("{}d {}h", seconds / 86_400, (seconds % 86_400) / 3600)
+    } else if seconds >= 3600 {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    } else if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    };
+    format!("~{value} remaining")
 }
 
 /// Wall-clock preview pacing. Keep fractional ticks between monitor refreshes;
@@ -258,6 +349,145 @@ mod tests {
         progress.encoding_finished(true);
         assert_eq!(progress.state, RunState::Stopped);
         assert_eq!(progress.fraction(), 0.25);
+    }
+
+    #[test]
+    fn eta_warms_up_only_during_active_simulation() {
+        let start = Instant::now();
+        let mut progress = RunProgress::new(true, 1000);
+        progress.observe_pace(start, false);
+        progress.observe_pace(start + Duration::from_secs(60), true);
+        assert_eq!(progress.remaining(), None);
+        progress.tick = 50;
+        progress.observe_pace(start + Duration::from_millis(60_500), true);
+        assert_eq!(progress.remaining(), None);
+        progress.tick = 100;
+        progress.observe_pace(start + Duration::from_secs(61), true);
+        assert_eq!(progress.remaining(), Some(Duration::from_secs(9)));
+    }
+
+    #[test]
+    fn eta_excludes_paused_time_and_manually_stepped_ticks() {
+        let start = Instant::now();
+        let mut progress = RunProgress::new(false, 1000);
+        progress.observe_pace(start, true);
+        progress.tick = 100;
+        progress.observe_pace(start + Duration::from_secs(1), true);
+        progress.observe_pace(start + Duration::from_secs(1), false);
+        assert_eq!(progress.remaining(), None);
+        // Stepping while paused cannot appear as a burst of free work on resume.
+        progress.tick = 500;
+        progress.observe_pace(start + Duration::from_secs(301), false);
+        progress.observe_pace(start + Duration::from_secs(301), true);
+        assert_eq!(progress.remaining(), Some(Duration::from_secs(5)));
+        progress.tick = 600;
+        progress.observe_pace(start + Duration::from_secs(302), true);
+        assert_eq!(progress.remaining(), Some(Duration::from_secs(4)));
+        assert_eq!(progress.pace.active_elapsed, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn eta_tracks_recent_slowdown_as_the_graph_grows() {
+        let start = Instant::now();
+        let mut progress = RunProgress::new(false, 10_000);
+        progress.observe_pace(start, true);
+        for second in 1..=4 {
+            progress.tick += 100;
+            progress.observe_pace(start + Duration::from_secs(second), true);
+        }
+        let early = progress.remaining().unwrap();
+        for second in 5..=16 {
+            progress.tick += 10;
+            progress.observe_pace(start + Duration::from_secs(second), true);
+        }
+        let rate = progress.pace.ticks_per_second.unwrap();
+        assert!((10.0..15.0).contains(&rate), "recent rate: {rate}");
+        assert!(progress.remaining().unwrap() > early * 5);
+    }
+
+    #[test]
+    fn eta_includes_zero_tick_stalls_and_full_render_time() {
+        let start = Instant::now();
+        let mut progress = RunProgress::new(true, 1000);
+        progress.observe_pace(start, true);
+        progress.tick = 100;
+        progress.observe_pace(start + Duration::from_secs(1), true);
+        let before = progress.remaining().unwrap();
+        // A full encoder queue still consumes wall time without advancing ticks.
+        progress.observe_pace(start + Duration::from_secs(3), true);
+        assert!(progress.remaining().unwrap() > before);
+
+        let mut slow_frame = RunProgress::new(true, 100);
+        slow_frame.observe_pace(start, true);
+        slow_frame.tick = 10;
+        slow_frame.observe_pace(start + Duration::from_secs(10), true);
+        assert_eq!(slow_frame.remaining(), Some(Duration::from_secs(90)));
+    }
+
+    #[test]
+    fn eta_includes_script_and_application_settling() {
+        let start = Instant::now();
+        let (mut timeline, mut progress) = progress_timeline(
+            vec![
+                birth("A"),
+                Event::Wait { ticks: 6 },
+                Event::Wait { ticks: 11 },
+            ],
+            7,
+            false,
+        );
+        progress.observe_pace(start, true);
+        let mut graph = Graph::new(1);
+        timeline.next(&mut graph, 6).unwrap();
+        progress.observe(&timeline);
+        progress.observe_pace(start + Duration::from_secs(1), true);
+        assert_eq!(progress.remaining(), Some(Duration::from_secs(3)));
+        timeline.next(&mut graph, 11).unwrap();
+        progress.observe(&timeline);
+        assert_eq!(progress.total_ticks - progress.tick, 7);
+        assert!(progress.remaining().is_some());
+        timeline.next(&mut graph, 7).unwrap();
+        progress.observe(&timeline);
+        assert_eq!(progress.remaining(), None);
+    }
+
+    #[test]
+    fn eta_never_promises_completion_for_trailing_work_or_encoder_drain() {
+        let start = Instant::now();
+        let mut progress = RunProgress::new(true, 100);
+        progress.observe_pace(start, true);
+        progress.observe_pace(start + Duration::from_secs(2), true);
+        assert_eq!(progress.remaining(), None); // No observed work yet.
+        progress.tick = 100;
+        progress.observe_pace(start + Duration::from_secs(3), true);
+        assert_eq!(progress.remaining(), None); // No ticks left, events may remain.
+        for state in [
+            RunState::Finalising,
+            RunState::Complete,
+            RunState::Stopped,
+            RunState::Failed,
+        ] {
+            progress.tick = 50;
+            progress.state = state;
+            assert_eq!(progress.remaining(), None, "{state:?}");
+        }
+        let mut zero = RunProgress::new(false, 0);
+        zero.observe_pace(start, true);
+        zero.observe_pace(start + Duration::from_secs(1), true);
+        assert_eq!(zero.remaining(), None);
+    }
+
+    #[test]
+    fn eta_labels_are_compact_and_never_round_down_to_zero() {
+        for (duration, expected) in [
+            (Duration::ZERO, "~1s remaining"),
+            (Duration::from_millis(59_100), "~1m 0s remaining"),
+            (Duration::from_secs(130), "~2m 10s remaining"),
+            (Duration::from_secs(7380), "~2h 3m remaining"),
+            (Duration::from_secs(90_000), "~1d 1h remaining"),
+        ] {
+            assert_eq!(remaining_label(duration), expected);
+        }
     }
 
     #[test]

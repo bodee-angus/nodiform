@@ -1,5 +1,13 @@
 # Release changes
 
+## 0.1.9
+
+- Edges now retain a minimum screen width when zoomed out: one physical pixel at the default thickness. The existing slider scales both world width and the pixel floor. Analytic antialiasing, gradients and opacity apply in previews and videos; nodes continue to scale with zoom.
+- Added approximate time remaining to preview and recording progress, based on recent active playback speed. Estimates include all remaining waits and settling ticks, adapt to slowdown, and exclude pauses. Preparation and video finalisation retain separate statuses.
+- Added **Grid**, a nonwrapping counterpart to Toroidal grid with the same Dimension, Range and colour modes. Dimension 2 and Range 10 produce 100 nodes and 180 edges; endpoints do not wrap across boundaries. All simulation and rendering remain 2D.
+
+The minimum-width display policy is recorded as `world-with-pixel-floor-v1`. Saved projects keep their thickness setting. Rule API, palette, force model and birth policy remain unchanged. The existing Gear Lever update channel continues to work.
+
 ## 0.1.8
 
 - Added a persistent **Edge thickness** slider in Settings → Appearance, from 0.25× to 8×. It affects preview and video independently of force strengths, updates live in preview, and is frozen during recording. Older projects default to 1×.

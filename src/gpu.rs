@@ -762,8 +762,9 @@ impl GpuGraph {
         }
     }
 
-    /// Multiply the base 0.18-world-unit edge width in both preview and export.
-    /// This appearance setting preserves zoom scaling and never changes forces.
+    /// Multiply the base 0.18-world-unit edge width in both preview and export,
+    /// with a one-physical-pixel minimum before applying this multiplier.
+    /// This appearance setting never changes node sizes or simulation forces.
     pub fn set_edge_width(&mut self, multiplier: f32) {
         self.edge_width = if multiplier.is_finite() {
             multiplier.clamp(0.25, 8.0)
@@ -1863,6 +1864,7 @@ mod tests {
             gpu.read_positions(2).unwrap(),
             vec![[-10.0, 0.0], [10.0, 0.0]]
         );
+        validate_edge_pixel_floor(&mut gpu);
 
         // With inertia, very stiff springs may cross their equilibrium, but
         // crossings must stay bounded and their oscillation must decay.
@@ -2377,7 +2379,7 @@ mod tests {
                         rgb[0] + rgb[2]
                     })
                     .sum();
-                let expected = 0.18 * multiplier * height as f32 / (2.0 * camera[3]);
+                let expected = (0.18 * height as f32 / (2.0 * camera[3])).max(1.0) * multiplier;
                 assert!(
                     (integrated_width - expected).abs() < expected * 0.012 + 0.03,
                     "Edge width {multiplier}× at {width}×{height}, preview={preview}: \
@@ -2391,6 +2393,104 @@ mod tests {
         gpu.set_edge_width(1.0);
         gpu.reset_camera();
         gpu.render(1024, 128);
+    }
+
+    fn validate_edge_pixel_floor(gpu: &mut super::GpuGraph) {
+        use crate::model::{EdgeSpec, Event, Graph, NodeSpec};
+
+        // Transparent anchors make the auto-fit extent independent of edge
+        // orientation. Measure the entire stroke's linear-light coverage, so
+        // diagonals and subpixel translations must retain the same thickness.
+        // The small extent exercises world-space widths above the floor; the
+        // large extent exercises the screen floor thousands of times farther
+        // out. Targets have different resolutions and even/odd pixel phases.
+        for (width, height, preview) in [(384, 256, false), (511, 383, true)] {
+            for extent in [10.0_f32, 10_000.0] {
+                for direction in [[1.0_f32, 0.0], [0.0, 1.0], [1.0, 1.0], [0.6, 0.8]] {
+                    let norm = direction[0].hypot(direction[1]);
+                    let direction = [direction[0] / norm, direction[1] / norm];
+                    let pixel_size = 2.0 * (extent + 0.01) * 1.08 / height as f32;
+                    let centre = [0.23 * pixel_size, -0.31 * pixel_size];
+                    let a = [
+                        centre[0] - 0.6 * extent * direction[0],
+                        centre[1] - 0.6 * extent * direction[1],
+                    ];
+                    let b = [
+                        centre[0] + 0.6 * extent * direction[0],
+                        centre[1] + 0.6 * extent * direction[1],
+                    ];
+                    let node = |id: &str, position| NodeSpec {
+                        id: id.into(),
+                        label: None,
+                        color: "#ffffff00".into(),
+                        radius: 0.01,
+                        position: Some(position),
+                    };
+                    let mut graph = Graph::new(42);
+                    graph
+                        .apply(&Event::Batch {
+                            nodes: vec![
+                                node("a", a),
+                                node("b", b),
+                                node("lower", [-extent, -extent]),
+                                node("upper", [extent, extent]),
+                            ],
+                            edges: vec![EdgeSpec {
+                                id: "stroke".into(),
+                                source: "a".into(),
+                                target: "b".into(),
+                                color: "#ffffff80".into(),
+                                strength: 4.0,
+                                gradient: false,
+                            }],
+                        })
+                        .unwrap();
+                    gpu.sync_graph(&graph, true).unwrap();
+                    let positions = gpu.read_positions(4).unwrap();
+                    let radii = read_style_radii(gpu);
+                    for multiplier in [0.25, 1.0, 4.0] {
+                        gpu.set_edge_width(multiplier);
+                        gpu.reset_camera();
+                        let (frame, camera) = if preview {
+                            gpu.render_preview(width, height);
+                            (
+                                gpu.read_preview_rgba().unwrap(),
+                                read_target_camera(gpu, &gpu.preview),
+                            )
+                        } else {
+                            gpu.render(width, height);
+                            (gpu.read_rgba().unwrap(), read_camera(gpu))
+                        };
+                        let world_per_pixel = 2.0 * camera[3] / height as f32;
+                        let expected = (0.18 / world_per_pixel).max(1.0) * multiplier;
+                        let area: f32 = frame
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|pixel| {
+                                assert_eq!(pixel[0], pixel[1]);
+                                assert_eq!(pixel[1], pixel[2]);
+                                assert_eq!(pixel[3], 255);
+                                super::linear_color([f32::from(pixel[0]) / 255.0, 0.0, 0.0, 1.0])[0]
+                            })
+                            .sum();
+                        let length_pixels = (b[0] - a[0]).hypot(b[1] - a[1]) / world_per_pixel;
+                        let measured = area / (length_pixels * (128.0 / 255.0));
+                        assert!(
+                            (measured - expected).abs() < expected * 0.02 + 0.015,
+                            "Stroke {multiplier}x at {width}x{height}, preview={preview}, \
+                             extent={extent}, direction={direction:?}: expected {expected} \
+                             physical pixels, measured {measured}"
+                        );
+                    }
+                    assert_eq!(gpu.read_positions(4).unwrap(), positions);
+                    assert_eq!(read_style_radii(gpu), radii);
+                }
+            }
+        }
+        gpu.set_edge_width(1.0);
+        gpu.reset_camera();
+        eprintln!("Edge visibility validation: physical-pixel floor, zoom-scaled widths, analytic diagonal AA, preview/export, opacity and unchanged simulation positions/radii");
     }
 
     fn read_camera(gpu: &super::GpuGraph) -> [f32; 4] {

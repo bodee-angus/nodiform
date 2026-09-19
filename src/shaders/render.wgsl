@@ -75,9 +75,11 @@ fn edge_vertex(@builtin(vertex_index) vertex: u32,
     if distance > 0.000001 { direction = delta / distance; }
     let normal = vec2<f32>(-direction.y, direction.x);
     let world_per_pixel = (camera.half_extent.y * 2.0) / frame.height;
-    // The appearance multiplier applies equally to preview and export. Edges
-    // keep world-space width and shrink naturally with the auto-fit camera.
-    let half_pixels = vec2<f32>(distance * 0.5, 0.09 * frame.edge_width) / world_per_pixel;
+    // Keep world-space scaling up close, then stop at one physical pixel before
+    // applying the appearance multiplier. Both preview and export use their
+    // own target pixels, independently of monitor/UI scaling.
+    let half_width_pixels = max(0.09 / world_per_pixel, 0.5) * frame.edge_width;
+    let half_pixels = vec2<f32>(distance * 0.5 / world_per_pixel, half_width_pixels);
     let local = corner(vertex) * (half_pixels + vec2<f32>(1.0));
     let world = (a + b) * 0.5 + world_per_pixel * (direction * local.x + normal * local.y);
     var output: Vertex;
@@ -96,12 +98,36 @@ fn edge_vertex(@builtin(vertex_index) vertex: u32,
     }
     return output;
 }
+// Integral of a square pixel projected onto one of the edge's local axes.
+// The projection is a trapezoid (a triangle at 45 degrees), not a fixed-width
+// ramp. Integrating it preserves thin-line brightness across orientations and
+// subpixel positions, without multisample textures or extra render passes.
+fn pixel_integral(point: f32, footprint: vec2<f32>) -> f32 {
+    let major = max(max(footprint.x, footprint.y), 0.000001);
+    let minor = min(footprint.x, footprint.y);
+    if minor < 0.00001 {
+        return clamp(0.5 + point / major, 0.0, 1.0);
+    }
+    let distance = abs(point);
+    var positive = 0.5 + distance / major;
+    if distance > 0.5 * (major - minor) {
+        let tail = max(0.5 * (major + minor) - distance, 0.0);
+        positive = 1.0 - tail * tail / (2.0 * major * minor);
+    }
+    return select(1.0 - positive, positive, point >= 0.0);
+}
+fn filtered_coverage(half_width: f32, point: f32, footprint: vec2<f32>) -> f32 {
+    return clamp(pixel_integral(half_width - point, footprint)
+        - pixel_integral(-half_width - point, footprint), 0.0, 1.0);
+}
+
 @fragment
 fn edge_fragment(input: Vertex) -> @location(0) vec4<f32> {
-    // Limit coverage by the actual width even for subpixel edges centred on a
-    // pixel. This prevents a thin line acquiring a minimum visible thickness.
-    let coverage = min(2.0 * input.half_pixels,
-        clamp(input.half_pixels + vec2<f32>(0.5) - abs(input.local_pixels), vec2<f32>(0.0), vec2<f32>(1.0)));
+    let dx = abs(dpdx(input.local_pixels));
+    let dy = abs(dpdy(input.local_pixels));
+    let coverage = vec2<f32>(
+        filtered_coverage(input.half_pixels.x, input.local_pixels.x, vec2<f32>(dx.x, dy.x)),
+        filtered_coverage(input.half_pixels.y, input.local_pixels.y, vec2<f32>(dx.y, dy.y)));
     let fraction = clamp(0.5 + input.local_pixels.x / max(2.0 * input.half_pixels.x, 0.000001), 0.0, 1.0);
     let color = mix(input.color, input.end_color, fraction);
     return vec4<f32>(color.rgb, color.a * coverage.x * coverage.y);

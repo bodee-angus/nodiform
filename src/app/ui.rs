@@ -313,7 +313,9 @@ impl NodiformApp {
                     });
                     if narrow {
                         ui.add_space(5.0);
-                        self.transport(ui);
+                        // Give the right-aligned controls an intrinsic row
+                        // height, rather than the card's remaining height.
+                        ui.horizontal(|ui| self.transport(ui));
                     }
                     ui.add_space(10.0);
                     self.progress_bar(ui);
@@ -321,7 +323,7 @@ impl NodiformApp {
             });
     }
 
-    fn progress_bar(&self, ui: &mut egui::Ui) {
+    fn progress_bar(&mut self, ui: &mut egui::Ui) {
         use playback::RunState;
         let p = Palette::for_ui(ui);
         let (fraction, text) = if let Some(progress) = &self.progress {
@@ -361,6 +363,19 @@ impl NodiformApp {
                 .fill(p.accent)
                 .text(text),
         );
+        if self
+            .smoke_probe
+            .as_ref()
+            .is_some_and(|probe| probe.frames >= 5)
+            && self.error.is_none()
+            && !ui.clip_rect().contains_rect(response.rect)
+        {
+            self.error = Some(format!(
+                "Progress bar is clipped: {:?} is outside {:?}.",
+                response.rect,
+                ui.clip_rect()
+            ));
+        }
         if let Some(progress) = &self.progress {
             response.on_hover_text(format!(
                 "{} / {} simulation ticks. Includes every wait between node additions, the script’s final settling ticks, and the final settling ticks in Settings. Video finalisation finishes after the last frame has been encoded.",

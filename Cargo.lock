@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "nodiform"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "bytemuck",
  "eframe",

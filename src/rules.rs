@@ -1185,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn growing_ring_closes_and_uses_seeded_colours() {
+    fn growing_ring_closes_and_uses_seed_independent_rainbow_colours() {
         let source = include_str!("../examples/ring.js");
         let plan = compile_source(source, json!({}), 42).unwrap();
         assert_eq!(
@@ -1204,7 +1204,7 @@ mod tests {
         assert_eq!((closing.source, closing.target), (79, 0));
         assert_eq!(graph.component_count(), 1);
         assert_eq!(plan, compile_source(source, json!({}), 42).unwrap());
-        assert_ne!(plan, compile_source(source, json!({}), 19).unwrap());
+        assert_eq!(plan, compile_source(source, json!({}), 19).unwrap());
         assert_eq!(
             compile_source(source, json!({"count": 1}), 42)
                 .unwrap()

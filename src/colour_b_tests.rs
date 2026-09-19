@@ -303,7 +303,10 @@ fn unknown_colour_modes_and_unrepresentable_fibonacci_counts_report_errors() {
     for (source, mut parameters, _) in cases() {
         parameters["colorBy"] = json!("unknown");
         let error = compile_source(source, parameters, 42).unwrap_err();
-        assert!(error.contains("Colour by"), "{error}");
+        assert!(
+            error.contains("colorBy") && error.contains("choose one of"),
+            "{error}"
+        );
     }
     for maximum in [
         json!(-1),
@@ -312,6 +315,9 @@ fn unknown_colour_modes_and_unrepresentable_fibonacci_counts_report_errors() {
         json!(9_007_199_254_740_992_u64),
     ] {
         let error = compile_source(FIBONACCI, json!({"maxNumber": maximum}), 42).unwrap_err();
-        assert!(error.contains("safe"), "{error}");
+        assert!(
+            error.contains("maxNumber") || error.contains("Maximum number"),
+            "{error}"
+        );
     }
 }

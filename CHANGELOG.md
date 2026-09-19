@@ -1,5 +1,15 @@
 # Release changes
 
+## 0.1.7
+
+- Added **Prime factors**, with edge strength multiplied by each prime factor's exponent and an optional shared node-1 anchor. Prime nodes omit self-connections; 1 is not a prime factor.
+- Added **Digits of pi**, calculating exact digits with BigInt arithmetic. Ten digit hubs connect to occurrence nodes, which also form a chain in digit order. The digit count includes the initial 3.
+- Added **Divisor graph**, connecting each number to all its smaller positive divisors. It requests one palette colour per node and sorts those colours by hue.
+- Added **Toroidal grid**, with **Dimension** and **Range** inputs. Coordinates wrap along each axis; the default 2 dimensions and range 10 create 100 nodes and 200 edges. Higher logical dimensions still use the 2D force solver. Duplicate connections are removed for range 2; range 1 creates a single node without self-loops.
+- Reworked `graph.palette(count)` and `N.palette(count)` to vary only hue at a fixed OKLCH lightness and chroma chosen to fit the full hue circle in sRGB. Generated colours have similar vividness without deliberately varying lightness or chroma. Hex quantisation introduces small deviations. The sequence remains deterministic and prefix-stable, with no fixed colour-count ceiling; sufficiently large palettes can repeat hex codes.
+
+The rule API is now `nodiform-rules-v5`. Saved scripts keep their source, but calls to `palette` use the new colours when rerun; earlier palette values are not preserved. Literal hex colours, `nodiform-force-v3`, and `live-neighbour-centroid-v2` are unchanged. The AppImage continues to use the existing Gear Lever update channel.
+
 ## 0.1.6
 
 - Added **connected-branch-walk** to the bundled **Letter permutations** example's **Birth order** input. It retains alternating branch traversal but creates every prefix before its descendants, preventing temporary disconnected islands when the maximum length is at least two.

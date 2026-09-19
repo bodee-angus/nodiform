@@ -47,7 +47,7 @@ This creates 500 nodes and `500 × 499 / 2 = 124,750` edges. Each pair is connec
 | `graph.setNode(id, options)` | Commit pending additions, then change a node's colour or radius. |
 | `graph.setEdge(id, options)` | Commit pending additions, then change an edge's colour, strength or gradient mode. |
 | `graph.random()` | Draw from the run's seeded pseudorandom sequence. |
-| `graph.palette(count)` | Return an array of vivid, perceptually spaced `#rrggbb` colours. |
+| `graph.palette(count)` | Return `#rrggbb` colours varying only hue at fixed OKLCH lightness and chroma. |
 
 Node options are `label`, `color`, `radius`, and an optional initial `position: [x, y]`. Edge options are `id`, `color`, `strength`, and `gradient`. Edge strength defaults to **4**, and gradient mode defaults to **false**. A custom edge ID can be supplied only when connecting to one target. For example:
 
@@ -87,9 +87,11 @@ function build(graph) {
 }
 ```
 
-`graph.palette(count)` accepts a nonnegative safe integer; zero returns an empty array. The former 8,192-colour ceiling is removed, although the requested array must still fit memory and JavaScript’s array representation. It uses Oklab/OKLCH with sRGB gamut handling to select vibrant colours. The same request returns the same hex codes, and increasing the count preserves the earlier colours. Returned arrays are independent copies. It does not consume `graph.random()` or require a network connection. **Insert → Colour palette** inserts the call in either editor API.
+`graph.palette(count)` accepts a nonnegative safe integer; zero returns an empty array. The former 8,192-colour ceiling is removed, although the requested array must still fit memory and JavaScript’s array representation. All generated colours use the same OKLCH lightness and chroma; only hue varies. The common lightness and chroma fit the entire hue circle inside sRGB, so individual hues do not need to be made lighter, darker, or less chromatic to fit. Conversion to 8-bit hex introduces small rounding differences.
 
-Small palettes maximise separation among a fixed set of vivid candidates. Beyond 128 colours the helper uses deterministic sampling, with a bounded number of attempts per colour. The colour prefix supported by earlier versions is preserved. Larger palettes can repeat hex values once candidate retries are exhausted; finite sRGB colour space cannot provide arbitrarily many unique colours. Increasingly large palettes also become difficult to distinguish. This is not a colour-vision-deficiency guarantee.
+Within the current version, the same request returns the same hex codes, and increasing the count preserves the earlier colours. Returned arrays are independent copies. The helper does not consume `graph.random()` or require a network connection. Its sequence distributes successive colours around the hue circle for category separation; it is not sorted into rainbow order. The **Divisor graph** example sorts its palette by hue before assigning colours to numbered nodes. **Insert → Colour palette** inserts the call in either editor API.
+
+Version 0.1.7 changes the palette values and records this under `nodiform-rules-v5`. Saved script source is unchanged, but rerunning calls to `palette` produces the new colours. Literal hex colours remain unchanged. Large palettes can repeat hex codes because the fixed-lightness/chroma circle has a finite 8-bit representation; nearby hues also become difficult to distinguish. The helper does not guarantee colour-vision-deficiency accessibility.
 
 When `gradient: true`, the edge blends from its source node's current colour to its target's current colour in linear-light RGB. The `color` option's **alpha** controls edge opacity, multiplied by endpoint alpha; its RGB is ignored. `#ffffffcc` means 80% edge opacity, and `#ffffff` means fully opaque. Omitting `color` keeps the default edge opacity of 60%. Node colour updates affect gradients automatically in both preview and video. Set `gradient: false` to return to an ordinary solid edge.
 
@@ -173,6 +175,18 @@ function* generate(N, params) {
 `N.node` and `N.edge` construct specifications for `N.batch`; they are not events to yield individually. `N.wait`, `N.setNode`, and `N.setEdge` produce events. `N.random` uses the same seeded sequence. `N.palette(count)` provides the same palette helper, and `N.edge` / `N.setEdge` accept `gradient`. Leading `@controls` metadata also works with this API.
 
 ## Included experiments and limits
+
+The examples live under **Experiment → Examples** and remain ordinary editable scripts. Their controls are declared in their source.
+
+**Prime factors** creates nodes `1` through the chosen count. Each number connects to its distinct prime factors, with edge strength multiplied by the factor's exponent: `12 = 2² × 3` connects to `2` at twice the base strength and to `3` at the base strength. Prime nodes omit self-connections. **Connect to 1** optionally adds a shared anchor at the base strength; 1 is not a prime factor. Three palette colours distinguish 1, primes, and composite numbers.
+
+**Digits of pi** computes digits using an exact BigInt spigot rather than `Math.PI`. The requested count includes the initial `3` and ignores the decimal point. Hubs `0` through `9` are created first, then occurrences such as `3-1, 1-1, 4-1, 1-2` connect to their own hub and the preceding occurrence. Each hub and its occurrences share a colour. The default 20 digits create 30 nodes and 39 edges. A hub remains disconnected until its digit appears.
+
+**Divisor graph** connects each number to every smaller positive divisor: `8` connects to `4, 2, 1`, and `12` connects to `6, 4, 3, 2, 1`. It generates one palette entry per node, sorts the colours by hue, and assigns them in numerical order. All edges use the same chosen strength and blend their endpoint colours.
+
+**Toroidal grid** builds a periodic grid from **Dimension** `d` and **Range** `r`. Each node is a coordinate tuple with values `1` through `r`; labels are `1, 2, …` in one dimension or `1-1, 1-2, …` in two. Each axis connects consecutive values and wraps `r` back to `1`. Births follow coordinate order with the last coordinate changing fastest, and each edge appears when both endpoints exist. It requests `r` palette colours and assigns them by the first coordinate, so slices through the remaining axes share a colour. The default `d = 2, r = 10` produces 100 nodes and 200 edges. These are logical dimensions of connectivity; every experiment still runs and renders in two spatial dimensions without prescribed grid positions.
+
+For `r ≥ 3`, the toroidal grid has `r^d` nodes, `d × r^d` edges and `2d` neighbours per node. Range 2 collapses opposite directions onto the same neighbour, so duplicate edges are omitted and degree is `d`. Range 1 produces one node without self-loops. Increasing dimension grows the node count exponentially; the same memory, representation and GPU limits apply as for other experiments.
 
 **Connect to the previous half** creates numbered nodes in order. Node `n` connects to the most recent `floor(n / 2)` predecessors: `1` has no edges at birth, `2` connects to `1`, `3` to `2`, `4` to `3` and `2`, `5` to `4` and `3`, and `6` to `5`, `4` and `3`. The default 500 nodes create 62,500 edges. Choose it under **Experiment → Examples**, then adjust its script-defined inputs. It has no fixed node-count ceiling; available resources and the solver's cost still apply. Its source is [half-neighbourhood.js](../examples/half-neighbourhood.js).
 

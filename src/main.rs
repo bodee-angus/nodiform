@@ -14,6 +14,9 @@ mod timeline;
 #[cfg(test)]
 mod example_tests;
 
+#[cfg(test)]
+mod toroidal_tests;
+
 fn main() -> eframe::Result {
     let mode = match diagnostics::LaunchMode::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
         Ok(mode) => mode,

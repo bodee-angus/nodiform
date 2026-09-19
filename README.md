@@ -2,7 +2,7 @@
 
 A native laboratory for emergent graphs. Write rules, choose the order in which a graph grows, and watch its structure develop in two dimensions.
 
-Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.6 adds a connected branch-walk order to the letter-permutation example. GPU storage grows with the graph without fixed node and edge caps; available memory and the GPU’s actual buffer and indexing limits still determine what can run. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
+Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. Version 0.1.7 adds prime-factor, pi-digit, divisor, and toroidal-grid experiments, and changes generated palettes to vary hue at constant perceptual lightness and chroma. GPU storage grows with the graph without fixed node and edge caps; available memory and the GPU’s actual buffer and indexing limits still determine what can run. The AppImage uses the existing Gear Lever update channel. Testing on an actual Bazzite machine and large-graph performance measurements remain outstanding. See the [release changes](CHANGELOG.md).
 
 ## What this version does
 
@@ -10,7 +10,7 @@ Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. 
 - Grows graph storage as needed, without the former 8,192-node or 250,000-edge caps.
 - Builds optional input controls from each script, without assuming an alphabet, node count, or graph family.
 - Applies code-defined colours, world-space node radii, and edge strengths, including changes later in a run.
-- Generates vivid hex palettes in a perceptual colour space with `graph.palette(count)` or `N.palette(count)`.
+- Generates hex palettes with similar vividness, varying only hue in OKLCH before conversion to sRGB, with `graph.palette(count)` or `N.palette(count)`.
 - Blends gradient edges between their endpoint colours, following later node colour changes.
 - Places each new node near its already-created neighbours using their current positions, or near the world origin when none exist. Scripts can override the initial position.
 - Calculates repulsion and weighted attraction on the GPU, with damped momentum, and renders the graph on the GPU.
@@ -19,7 +19,11 @@ Nodiform is an experimental desktop alpha, designed with Bazzite Linux in mind. 
 - Offers **Preview** at the canvas’s physical pixel resolution and **Record** at an independent output resolution; recording streams fixed-timeline video to FFmpeg.
 - Optionally sizes nodes by connection count without changing the simulation's forces.
 
-The default experiment is a small eight-node chain with no required inputs. **Experiment → Examples** contains **Connect to every earlier node**, **Connect to the previous half**, letter permutations, a growing ring, and modular residues. Both numbered growth examples default to 500 nodes: connecting to every earlier node creates 124,750 edges, while connecting to the previous half creates 62,500. These are editable experiments, not fixed application modes.
+The default experiment is a small eight-node chain with no required inputs. **Experiment → Examples** contains **Connect to every earlier node**, **Connect to the previous half**, **Letter permutations**, **Growing ring**, **Modular residues**, **Prime factors**, **Digits of pi**, **Divisor graph**, and **Toroidal grid**. Both numbered growth examples default to 500 nodes: connecting to every earlier node creates 124,750 edges, while connecting to the previous half creates 62,500. These are editable experiments, not fixed application modes.
+
+**Toroidal grid** takes **Dimension** and **Range**. Each coordinate wraps back to 1, so dimension 1 makes a cycle and dimension 2 makes a grid with wrapped rows and columns. The default dimension 2 and range 10 produce 100 nodes and 200 edges. Higher logical dimensions add connections, while the force simulation and renderer remain 2D. Node colours identify the first coordinate. See the [example rules](docs/rules.md#included-experiments-and-limits).
+
+Generated colours now share one OKLCH lightness and chroma; only hue varies. Small deviations remain after conversion to 8-bit hex. Saved script source is preserved, but rerunning a script that calls `palette` uses the new colours. Literal hex colours are unchanged.
 
 For letter permutations, choose **Inputs → Birth order → connected-branch-walk** to create each prefix before its descendants. With a maximum length of at least two, every node after the first connects to the existing graph at birth. The final graph is the same as with the other birth orders. See the [permutation examples](docs/rules.md#included-experiments-and-limits).
 

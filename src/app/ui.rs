@@ -79,6 +79,10 @@ impl NodiformApp {
                                     ("ring", "Growing ring"),
                                     ("abc", "Letter permutations"),
                                     ("modular", "Modular residues"),
+                                    ("prime", "Prime factors"),
+                                    ("pi", "Digits of pi"),
+                                    ("divisors", "Divisor graph"),
+                                    ("torus", "Toroidal grid"),
                                 ] {
                                     if ui.button(label).clicked() {
                                         self.confirm_example = Some(id);
@@ -550,6 +554,10 @@ impl NodiformApp {
             "abc" => include_str!("../../examples/abc-permutations.js"),
             "ring" => include_str!("../../examples/ring.js"),
             "modular" => include_str!("../../examples/modular-residues.js"),
+            "prime" => include_str!("../../examples/prime-factors.js"),
+            "pi" => include_str!("../../examples/pi-digit-chain.js"),
+            "divisors" => include_str!("../../examples/divisor-graph.js"),
+            "torus" => include_str!("../../examples/toroidal-grid.js"),
             _ => include_str!("../../examples/starter.js"),
         };
         let appearance = self.project.size_by_connections;

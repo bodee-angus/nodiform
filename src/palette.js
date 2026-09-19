@@ -1,10 +1,10 @@
-// A dependency-free categorical palette in Oklab / OKLCH, returning sRGB hex.
+// A dependency-free palette with fixed OKLCH lightness and chroma, returning sRGB hex.
 // Oklab conversion matrices: Björn Ottosson's public-domain reference,
 // https://bottosson.github.io/posts/oklab/ (2021-01-25 matrices).
-// The first 128 colours maximise the nearest Oklab distance among a fixed set
-// of vivid candidates. Larger palettes continue with low-discrepancy OKLCH
-// sampling. Duplicate retries are bounded: very large palettes may repeat hex
-// values, and thousands of colours cannot all be visually distinct.
+// Only hue changes. These common-gamut values fit the entire hue circle without
+// clipping channels or reducing chroma for individual colours. Conversion to
+// 8-bit hex introduces small rounding differences and, in large palettes,
+// repeated colours. No finite colour space can supply unlimited unique colours.
 (() => {
     'use strict';
     // Captured only inside the private bundled runner; standalone use needs no host.
@@ -12,16 +12,15 @@
     const integer = Number.isSafeInteger;
     const slice = Function.prototype.call.bind(Array.prototype.slice);
     const push = Function.prototype.call.bind(Array.prototype.push);
-    const has = Function.prototype.call.bind(Set.prototype.has);
-    const add = Function.prototype.call.bind(Set.prototype.add);
     const ErrorType = Error;
     const math = Math;
     const chosen = [];
-    const used = new Set();
-    const candidates = [];
-    let extension = 0;
+    const lightness = 0.75;
+    const chroma = 0.127;
+    const hueStep = 0.6180339887498949;
+    const startingHue = 255 / 360;
 
-    function linearRgb(lightness, a, b) {
+    function linearRgb(a, b) {
         const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3;
         const m = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3;
         const s = (lightness - 0.0894841775 * a - 1.2914855480 * b) ** 3;
@@ -32,102 +31,30 @@
         ];
     }
 
-    function inGamut(rgb) {
-        return rgb[0] >= 0 && rgb[0] <= 1 &&
-            rgb[1] >= 0 && rgb[1] <= 1 && rgb[2] >= 0 && rgb[2] <= 1;
-    }
-
-    function vivid(lightness, hue, saturation = 0.94) {
-        const angle = hue * math.PI * 2;
-        const x = math.cos(angle), y = math.sin(angle);
-        // Reduce chroma at constant lightness and hue to fit sRGB, rather than
-        // clipping channels, which would distort the intended perceptual hue.
-        let low = 0, high = 0.34;
-        for (let step = 0; step < 14; step++) {
-            const middle = (low + high) / 2;
-            if (inGamut(linearRgb(lightness, middle * x, middle * y))) low = middle;
-            else high = middle;
-        }
-        const chroma = low * saturation;
-        const a = chroma * x, b = chroma * y;
-        const rgb = linearRgb(lightness, a, b);
+    function colourAt(index) {
+        // Golden-angle spacing spreads neighbouring entries around the circle.
+        // The index alone determines hue, so growing a palette preserves its prefix.
+        const angle = ((startingHue + index * hueStep) % 1) * math.PI * 2;
+        const rgb = linearRgb(chroma * math.cos(angle), chroma * math.sin(angle));
         const digits = '0123456789abcdef';
         let hex = '#';
         for (let channel = 0; channel < 3; channel++) {
             const linear = rgb[channel];
             const srgb = linear <= 0.0031308 ? 12.92 * linear :
                 1.055 * linear ** (1 / 2.4) - 0.055;
-            const byte = math.round(math.max(0, math.min(1, srgb)) * 255);
+            const byte = math.round(srgb * 255);
             hex += digits[byte >>> 4] + digits[byte & 15];
         }
-        return { lightness, a, b, hex, nearest: Infinity };
-    }
-
-    function initialise() {
-        if (candidates.length) return;
-        // Seed with a bright blue. Every prefix is stable when count increases.
-        candidates[0] = vivid(0.70, 255 / 360);
-        const lightnesses = [0.64, 0.70, 0.76, 0.82];
-        for (let hue = 0; hue < 180; hue++) {
-            // Select the lightness with greatest in-gamut chroma at this hue.
-            // A fixed lightness can make yellow muddy or pink pastel even at
-            // maximum saturation. This keeps the candidate pool vivid while
-            // letting each hue find its most colourful usable brightness.
-            let mostChromatic;
-            for (let level = 0; level < lightnesses.length; level++) {
-                const colour = vivid(lightnesses[level], hue / 180);
-                if (!mostChromatic || colour.a ** 2 + colour.b ** 2 >
-                    mostChromatic.a ** 2 + mostChromatic.b ** 2) {
-                    mostChromatic = colour;
-                }
-            }
-            candidates[candidates.length] = mostChromatic;
-        }
-    }
-
-    function chooseNext() {
-        let best;
-        for (let index = 0; index < candidates.length; index++) {
-            const candidate = candidates[index];
-            if (!has(used, candidate.hex) && (!best || candidate.nearest > best.nearest)) {
-                best = candidate;
-            }
-        }
-        push(chosen, best.hex);
-        add(used, best.hex);
-        for (let index = 0; index < candidates.length; index++) {
-            const candidate = candidates[index];
-            const dl = candidate.lightness - best.lightness;
-            const da = candidate.a - best.a;
-            const db = candidate.b - best.b;
-            candidate.nearest = math.min(candidate.nearest, dl * dl + da * da + db * db);
-        }
+        return hex;
     }
 
     return function palette(count) {
         if (!integer(count) || count < 0) {
             throw new ErrorType('palette(count) requires a nonnegative safe integer');
         }
-        if (count === 0) return [];
-        initialise();
-        while (chosen.length < math.min(count, 128)) chooseNext();
         while (chosen.length < count) {
             if ((chosen.length & 255) === 0) reportProgress();
-            let colour;
-            // A finite colour space cannot supply unlimited unique hex codes.
-            // Bound retries rather than exhausting a budget or looping forever.
-            for (let attempt = 0; attempt < 32; attempt++) {
-                extension += 1;
-                // Different irrational steps spread hue, lightness and saturation
-                // without using or changing the experiment's seeded random stream.
-                const hue = (extension * 0.6180339887498949 + 255 / 360) % 1;
-                const lightness = 0.64 + 0.18 * ((extension * 0.4142135623730951) % 1);
-                const saturation = 0.82 + 0.16 * ((extension * 0.7320508075688772) % 1);
-                colour = vivid(lightness, hue, saturation);
-                if (!has(used, colour.hex)) break;
-            }
-            push(chosen, colour.hex);
-            add(used, colour.hex);
+            push(chosen, colourAt(chosen.length));
         }
         // Caller edits must never affect a later palette request.
         return slice(chosen, 0, count);

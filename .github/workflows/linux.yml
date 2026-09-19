@@ -70,7 +70,7 @@ jobs:
           NODIFORM_SMOKE_THEME=light NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/light-rules.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=abc NODIFORM_SMOKE_PARAMETERS='{"order":"branch-walk","ticksPerNode":6}' NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-permutations.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=abc NODIFORM_SMOKE_PARAMETERS='{"order":"connected-branch-walk","ticksPerNode":6}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-inputs.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
-          NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=abc NODIFORM_SMOKE_PARAMETERS='{"order":"branch-walk","ticksPerNode":6}' NODIFORM_SMOKE_DEGREE=1 NODIFORM_SMOKE_SETTINGS=1 NODIFORM_SMOKE_COMPACT=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-settings.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+          NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=abc NODIFORM_SMOKE_PARAMETERS='{"order":"branch-walk","ticksPerNode":6}' NODIFORM_SMOKE_DEGREE=1 NODIFORM_SMOKE_EDGE_WIDTH=4 NODIFORM_SMOKE_SETTINGS=1 NODIFORM_SMOKE_COMPACT=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-settings.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_THEME=light NODIFORM_SMOKE_EXAMPLE=complete NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/light-inputs.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_COMPACT=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-compact.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=abc NODIFORM_SMOKE_PARAMETERS='{"order":"branch-walk","ticksPerNode":6}' NODIFORM_SMOKE_HIDPI=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-hidpi.ppm" timeout 60s xvfb-run -a -s '-screen 0 3200x2000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
@@ -79,6 +79,26 @@ jobs:
           NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=pi NODIFORM_SMOKE_PARAMETERS='{"digits":40,"ticksPerDigit":0}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-pi-digits.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=divisors NODIFORM_SMOKE_PARAMETERS='{"count":40,"ticksPerNode":0}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-divisor-graph.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
           NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=torus NODIFORM_SMOKE_PARAMETERS='{"dimensions":2,"range":10,"ticksPerNode":0}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-toroidal-grid.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+
+          NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=fibonacci NODIFORM_SMOKE_PARAMETERS='{"maxNumber":20,"ticksPerNode":0,"ticksPerEdge":0,"finalTicks":24}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_EDGE_WIDTH=4 NODIFORM_SMOKE_COMPLETE=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-fibonacci-complete.ppm" timeout 45s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+          NODIFORM_SMOKE_THEME=dark NODIFORM_SMOKE_EXAMPLE=fibonacci NODIFORM_SMOKE_PARAMETERS='{"maxNumber":20,"ticksPerNode":0,"ticksPerEdge":0,"finalTicks":24,"colorBy":"fibonacci-membership"}' NODIFORM_SMOKE_TAB=inputs NODIFORM_SMOKE_EDGE_WIDTH=4 NODIFORM_SMOKE_INTENT=record NODIFORM_SMOKE_OUTPUT_DIR="$RUNNER_TEMP/nodiform-smoke-video" NODIFORM_SMOKE_COMPLETE=1 NODIFORM_SMOKE_SCREENSHOT="$PWD/ui-review/dark-fibonacci-recorded.ppm" timeout 60s xvfb-run -a -s '-screen 0 1600x1000x24' dist/Nodiform-x86_64.AppImage --appimage-extract-and-run --smoke-test
+          python3 - <<'PYVERIFY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "nodiform-smoke-video"
+          manifests = list(root.glob("*/manifest.json"))
+          assert len(manifests) == 1, manifests
+          manifest = json.loads(manifests[0].read_text())
+          outcome = json.loads(manifests[0].with_name("run-outcome.json").read_text())
+          assert manifest["status"] == "complete", manifest
+          assert manifest["metadata"]["edge_width_multiplier"] == 4
+          assert manifest["metadata"]["planned_ticks"] == 264
+          assert manifest["frames"] == 66, manifest["frames"]
+          assert outcome["status"] == "completed", outcome
+          assert outcome["actual_tick"] == 264, outcome
+          assert (outcome["nodes"], outcome["edges"]) == (21, 23), outcome
+          print("Recording completed: 264 ticks, 66 frames, 21 nodes, 23 edges, edge thickness 4×")
+          PYVERIFY
 
       - name: Upload native interface captures
         uses: actions/upload-artifact@v4

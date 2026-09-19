@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const RULE_API_VERSION: &str = "nodiform-rules-v5";
+pub const RULE_API_VERSION: &str = "nodiform-rules-v6";
 const MAX_SOURCE_BYTES: usize = 1_048_576;
 const MAX_PARAMETER_BYTES: usize = 262_144;
 const MAX_REQUEST_BYTES: usize = 2_097_152;
@@ -708,15 +708,40 @@ mod tests {
         let mut hue_sectors = [false; 12];
         for colour in &colours {
             let [lightness, a, b] = oklab(colour);
-            assert!((lightness - 0.75).abs() < 0.002, "{colour}: {lightness}");
+            assert!((lightness - 0.75015).abs() < 0.002, "{colour}: {lightness}");
             let chroma = a.hypot(b);
-            assert!((chroma - 0.127).abs() < 0.002, "{colour}: {chroma}");
+            assert!((chroma - 0.1275).abs() < 0.002, "{colour}: {chroma}");
             let hue = b.atan2(a).rem_euclid(std::f64::consts::TAU);
             hue_sectors[(hue / std::f64::consts::TAU * 12.0).floor() as usize] = true;
         }
         assert!(hue_sectors.into_iter().all(|covered| covered));
-        assert_eq!(&colours[..12], palette_colours(12));
-        assert_eq!(&colours[..3], palette_colours(3));
+        // Each requested size spans the whole hue wheel rather than preserving
+        // a categorical prefix at the cost of jumping around the rainbow.
+        assert_ne!(&colours[..12], palette_colours(12));
+        assert_ne!(&colours[..3], palette_colours(3));
+    }
+
+    #[test]
+    fn palettes_follow_the_rainbow_even_after_hex_rounding() {
+        for count in [1, 2, 3, 12, 128, 8_193] {
+            let colours = palette_colours(count);
+            let hues: Vec<_> = colours
+                .iter()
+                .map(|hex| {
+                    let channel =
+                        |index| f64::from(u8::from_str_radix(&hex[index..index + 2], 16).unwrap());
+                    let [r, g, b] = [channel(1), channel(3), channel(5)];
+                    // This chromaticity-plane angle independently preserves hue
+                    // ordering without using the palette's RGB sector formula.
+                    (3.0_f64.sqrt() * (g - b))
+                        .atan2(2.0 * r - g - b)
+                        .rem_euclid(std::f64::consts::TAU)
+                })
+                .collect();
+            assert_eq!(colours.len(), count);
+            assert_eq!(hues[0], 0.0);
+            assert!(hues.windows(2).all(|pair| pair[0] <= pair[1]));
+        }
     }
 
     #[test]
@@ -732,9 +757,10 @@ mod tests {
             if (JSON.stringify(colours) !== JSON.stringify(unchanged)) throw new Error('API mismatch');
             colours[0] = '#000000';
             colours.length = 0;
-            if (JSON.stringify(graph.palette(12)) !== JSON.stringify(unchanged)) throw new Error('Mutated cache');
+            if (JSON.stringify(graph.palette(12)) !== JSON.stringify(unchanged)) throw new Error('Mutated palette');
             const extended = N.palette(128);
-            if (JSON.stringify(extended.slice(0, 12)) !== JSON.stringify(unchanged)) throw new Error('Changed prefix');
+            if (extended[1] === unchanged[1]) throw new Error('Palette did not respace hues');
+            if (JSON.stringify(graph.palette(12)) !== JSON.stringify(unchanged)) throw new Error('Changed smaller palette');
             if (new Set(extended).size !== extended.length) throw new Error('Small palette repeats');
             graph.add('b', {radius: graph.random() + 1});
         }"#;
@@ -773,13 +799,13 @@ mod tests {
             .map(|colour| oklab(colour))
             .collect();
         for (index, colour) in colours.iter().enumerate() {
-            assert!((colour[0] - 0.75).abs() < 0.002);
-            assert!((colour[1].hypot(colour[2]) - 0.127).abs() < 0.002);
+            assert!((colour[0] - 0.75015).abs() < 0.002);
+            assert!((colour[1].hypot(colour[2]) - 0.1275).abs() < 0.002);
             for other in &colours[..index] {
                 let squared: f64 = colour.iter().zip(other).map(|(a, b)| (a - b).powi(2)).sum();
-                // Twelve hues on a fixed-chroma circle cannot attain the
-                // separation of a palette that also changes lightness/chroma.
-                assert!(squared.sqrt() > 0.04);
+                // Equally spaced hues give each neighbour the same intended
+                // perceptual separation, with a little hex-rounding tolerance.
+                assert!(squared.sqrt() > 0.063);
             }
         }
     }
@@ -819,18 +845,22 @@ mod tests {
     }
 
     #[test]
-    fn build_without_controls_is_a_complete_custom_experiment() {
+    fn starter_colour_controls_and_metadata_free_builders_work() {
         let plan = compile_source(include_str!("../examples/starter.js"), json!({}), 42).unwrap();
         assert_eq!(
             (plan.node_count, plan.edge_count, plan.total_ticks),
             (8, 7, 192)
         );
-        assert!(
-            crate::experiment::parse_controls(include_str!("../examples/starter.js"))
-                .unwrap()
-                .is_empty()
-        );
+        let controls =
+            crate::experiment::parse_controls(include_str!("../examples/starter.js")).unwrap();
+        let colour = &controls["colorBy"];
+        assert_eq!(colour.kind, crate::experiment::ControlKind::Select);
+        assert_eq!(colour.default, json!("birth-order"));
+        assert_eq!(colour.options, ["birth-order", "alternating", "single"]);
         let arbitrary = "function build(graph, p) { for(const id of p.names) graph.add(id); graph.connect(p.names[2], graph.ids().slice(0,2)); graph.wait(99); }";
+        assert!(crate::experiment::parse_controls(arbitrary)
+            .unwrap()
+            .is_empty());
         let plan = compile_source(arbitrary, json!({"names":["gamma","alpha","beta"]}), 1).unwrap();
         let Event::Batch { nodes, edges } = &plan.events[0] else {
             panic!();

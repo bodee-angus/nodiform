@@ -83,6 +83,7 @@ impl NodiformApp {
                                     ("pi", "Digits of pi"),
                                     ("divisors", "Divisor graph"),
                                     ("torus", "Toroidal grid"),
+                                    ("fibonacci", "Fibonacci chain"),
                                 ] {
                                     if ui.button(label).clicked() {
                                         self.confirm_example = Some(id);
@@ -257,9 +258,9 @@ impl NodiformApp {
                     ui.available_width(),
                     (ui.available_height()
                         - if ui.available_width() < 600.0 {
-                            167.0
+                            201.0
                         } else {
-                            123.0
+                            157.0
                         })
                     .max(150.0),
                 );
@@ -314,13 +315,69 @@ impl NodiformApp {
                         ui.add_space(5.0);
                         self.transport(ui);
                     }
+                    ui.add_space(10.0);
+                    self.progress_bar(ui);
                 });
             });
     }
 
+    fn progress_bar(&self, ui: &mut egui::Ui) {
+        use playback::RunState;
+        let p = Palette::for_ui(ui);
+        let (fraction, text) = if let Some(progress) = &self.progress {
+            let kind = if progress.recording {
+                "Render"
+            } else {
+                "Preview"
+            };
+            let state = match progress.state {
+                RunState::Running if self.recorder_start.is_some() => "Preparing encoder",
+                RunState::Running if self.paused => "Paused",
+                RunState::Running => "Running",
+                RunState::Finalising => "Finalising video",
+                RunState::Complete => "Complete",
+                RunState::Stopped if self.recorder.is_some() => "Stopped · finalising video",
+                RunState::Stopped => "Stopped",
+                RunState::Failed => "Failed",
+            };
+            let fraction = progress.fraction();
+            (
+                fraction,
+                format!("{kind} · {:.1}% · {state}", fraction * 100.0),
+            )
+        } else if self
+            .pending_run
+            .as_ref()
+            .is_some_and(|(intent, _)| *intent != Intent::Validate)
+        {
+            (0.0, "Preparing simulation…".into())
+        } else {
+            (0.0, "Ready to preview or record".into())
+        };
+        let response = ui.add(
+            egui::ProgressBar::new(fraction)
+                .desired_width(ui.available_width())
+                .desired_height(20.0)
+                .fill(p.accent)
+                .text(text),
+        );
+        if let Some(progress) = &self.progress {
+            response.on_hover_text(format!(
+                "{} / {} simulation ticks. Includes every wait between node additions, the script’s final settling ticks, and the final settling ticks in Settings. Video finalisation finishes after the last frame has been encoded.",
+                progress.tick, progress.total_ticks
+            ));
+        }
+    }
+
     fn transport(&mut self, ui: &mut egui::Ui) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add_enabled(self.busy(), button("Stop")).clicked() {
+            let can_stop = self.busy()
+                && !self.finishing
+                && self
+                    .timeline
+                    .as_ref()
+                    .is_none_or(|timeline| !timeline.finished());
+            if ui.add_enabled(can_stop, button("Stop")).clicked() {
                 self.stop();
             }
             if ui
@@ -451,6 +508,25 @@ impl NodiformApp {
                     ctx.request_repaint();
                 }
                 ui.label(egui::RichText::new("Connection count changes appearance only. Node sizes still follow the zoom level.").size(12.0).color(p.secondary));
+                ui.add_space(8.0);
+                let thickness_changed = ui.add_enabled_ui(!recording, |ui| {
+                    ui.add(egui::Slider::new(&mut self.project.edge_width, 0.25..=8.0)
+                        .text("Edge thickness")
+                        .suffix("×")
+                        .logarithmic(true)
+                        .max_decimals(2))
+                        .on_hover_text("Changes edge appearance in the preview and saved video. Edges still follow the zoom level.")
+                        .changed()
+                }).inner;
+                if thickness_changed {
+                    self.gpu.set_edge_width(self.project.edge_width);
+                    if let Some((_, snapshot)) = &mut self.pending_run {
+                        snapshot.edge_width = self.project.edge_width;
+                    }
+                    self.preview_dirty = true;
+                    ctx.request_repaint();
+                }
+                ui.label(egui::RichText::new("Appearance only. Set the thickness before starting a recording.").size(12.0).color(p.secondary));
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_enabled_ui(!self.busy(), |ui| {
@@ -558,18 +634,22 @@ impl NodiformApp {
             "pi" => include_str!("../../examples/pi-digit-chain.js"),
             "divisors" => include_str!("../../examples/divisor-graph.js"),
             "torus" => include_str!("../../examples/toroidal-grid.js"),
+            "fibonacci" => include_str!("../../examples/fibonacci-chain.js"),
             _ => include_str!("../../examples/starter.js"),
         };
         let appearance = self.project.size_by_connections;
+        let edge_width = self.project.edge_width;
         self.project = Project {
             source: source.into(),
             size_by_connections: appearance,
+            edge_width,
             ..Project::default()
         };
         self.parameters_text = "{}".into();
         self.project_path = None;
         self.editor_tab = EditorTab::Rules;
         self.error = None;
+        self.progress = None;
         self.confirm_example = None;
         self.status = "Script loaded. All generation behaviour is defined in its rules.".into();
     }

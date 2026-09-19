@@ -164,13 +164,19 @@ fn connected_branch_walk_keeps_every_birth_attached_without_changing_the_graph()
         assert_eq!(born.len(), baseline.nodes.len());
         assert_eq!(connections.len(), baseline.edges.len());
         assert_eq!(topology(&graph), topology(&baseline));
-        let expected_styles: BTreeMap<_, _> = baseline
+        let expected_radii: BTreeMap<_, _> = baseline
             .nodes
             .iter()
-            .map(|node| (&node.id, (node.color, node.radius)))
+            .map(|node| (&node.id, node.radius))
             .collect();
+        let mut group_colours = BTreeMap::new();
         for node in &graph.nodes {
-            assert_eq!((node.color, node.radius), expected_styles[&node.id]);
+            assert_eq!(node.radius, expected_radii[&node.id]);
+            let first = node.id.chars().next().unwrap();
+            assert_eq!(
+                node.color,
+                *group_colours.entry(first).or_insert(node.color)
+            );
         }
     }
 }
@@ -210,19 +216,17 @@ fn every_birth_order_preserves_topology_and_first_letter_colours() {
         for repeat in [false, true] {
             let baseline = permutation(alphabet, repeat, "lexicographic", 42);
             let expected_edges = topology(&baseline);
-            let expected_colours: BTreeMap<_, _> = baseline
-                .nodes
-                .iter()
-                .map(|node| (node.id.clone(), node.color))
-                .collect();
             for order in ["reverse", "shuffle", "branch-walk", "connected-branch-walk"] {
                 let graph = permutation(alphabet, repeat, order, 137);
                 assert_eq!(graph.nodes.len(), baseline.nodes.len());
                 assert_eq!(topology(&graph), expected_edges);
+                let mut group_colours = BTreeMap::new();
                 for node in &graph.nodes {
-                    assert_eq!(node.color, expected_colours[&node.id]);
-                    let first = node.id.chars().next().unwrap().to_string();
-                    assert_eq!(node.color, expected_colours[&first]);
+                    let first = node.id.chars().next().unwrap();
+                    assert_eq!(
+                        node.color,
+                        *group_colours.entry(first).or_insert(node.color)
+                    );
                 }
             }
         }

@@ -2,6 +2,7 @@
   "alphabet": {"type":"text","label":"Alphabet","default":"ABC"},
   "maxLength": {"type":"integer","label":"Maximum length","default":3,"min":1},
   "repetitions": {"type":"boolean","label":"Repeat letters","default":false},
+  "colorBy": {"type":"select","label":"Colour by","description":"Groups receive rainbow colours in the order they first appear.","default":"starting-letter","options":["starting-letter","ending-letter","word-length","birth-order","single"]},
   "order": {"type":"select","label":"Birth order","description":"Connected branch-walk visits each prefix before its descendants.","default":"lexicographic","options":["lexicographic","reverse","shuffle","branch-walk","connected-branch-walk"]},
   "ticksPerNode": {"type":"integer","label":"Ticks between births","default":24,"min":0,"max":1000000},
   "finalTicks": {"type":"integer","label":"Final settling ticks","default":0,"min":0,"max":1000000}
@@ -28,8 +29,35 @@ function* generate(N, params) {
     }
     // Without repetition, no word can exceed the number of available letters.
     const depthLimit = repeat ? maxLength : Math.min(maxLength, alphabet.length);
-    const colors = N.palette(alphabet.length);
-    const letterColors = new Map(alphabet.map((letter, index) => [letter, colors[index]]));
+    const mode = params.colorBy ?? "starting-letter";
+    let colorCount = mode === "single" ? 1 : mode === "word-length" ? depthLimit : alphabet.length;
+    if (mode === "birth-order") {
+        // Only a per-birth rainbow needs the full count. Other modes keep
+        // streaming their words without allocating a list of all births.
+        if (alphabet.length === 1) colorCount = depthLimit;
+        else {
+            let layerCount = 1;
+            colorCount = 0;
+            for (let length = 1; length <= depthLimit; length++) {
+                layerCount *= repeat ? alphabet.length : alphabet.length - length + 1;
+                colorCount += layerCount;
+                if (!Number.isSafeInteger(colorCount)) {
+                    throw new Error("Birth-order colours need a safely representable node count");
+                }
+            }
+        }
+    }
+    const colors = N.palette(colorCount);
+    const groupColors = new Map();
+    let birthIndex = 0;
+    function nodeColor(letters) {
+        if (mode === "birth-order") return colors[birthIndex++];
+        if (mode === "single") return colors[0];
+        const group = mode === "ending-letter" ? letters[letters.length - 1]
+            : mode === "word-length" ? letters.length : letters[0];
+        if (!groupColors.has(group)) groupColors.set(group, colors[groupColors.size]);
+        return groupColors.get(group);
+    }
     const sortedAlphabet = [...alphabet].sort();
     function* words(length, letters = sortedAlphabet) {
         // Keep traversal state on an explicit stack, so depth is not limited
@@ -135,7 +163,7 @@ function* generate(N, params) {
         }
         born.add(word);
         yield N.batch(
-            [N.node(word, { color: letterColors.get(letters[0]), radius: 1.6 })], edges
+            [N.node(word, { color: nodeColor(letters), radius: 1.6 })], edges
         );
         yield N.wait(ticks);
     }

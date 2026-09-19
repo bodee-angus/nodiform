@@ -13,7 +13,10 @@ struct Edge {
     color: vec4<f32>,
 }
 struct Camera { center: vec2<f32>, half_extent: vec2<f32> }
-struct Frame { width: f32, height: f32, count: u32, edges: u32 }
+struct Frame {
+    width: f32, height: f32, count: u32, edges: u32,
+    edge_width: f32, _pad0: f32, _pad1: f32, _pad2: f32,
+}
 @group(0) @binding(0) var<storage, read> positions: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read> styles: array<Style>;
 @group(0) @binding(2) var<storage, read> edges: array<Edge>;
@@ -72,8 +75,9 @@ fn edge_vertex(@builtin(vertex_index) vertex: u32,
     if distance > 0.000001 { direction = delta / distance; }
     let normal = vec2<f32>(-direction.y, direction.x);
     let world_per_pixel = (camera.half_extent.y * 2.0) / frame.height;
-    // Edges also have world-space width; no screen-space minimum thickness.
-    let half_pixels = vec2<f32>(distance * 0.5, 0.09) / world_per_pixel;
+    // The appearance multiplier applies equally to preview and export. Edges
+    // keep world-space width and shrink naturally with the auto-fit camera.
+    let half_pixels = vec2<f32>(distance * 0.5, 0.09 * frame.edge_width) / world_per_pixel;
     let local = corner(vertex) * (half_pixels + vec2<f32>(1.0));
     let world = (a + b) * 0.5 + world_per_pixel * (direction * local.x + normal * local.y);
     var output: Vertex;
@@ -94,7 +98,10 @@ fn edge_vertex(@builtin(vertex_index) vertex: u32,
 }
 @fragment
 fn edge_fragment(input: Vertex) -> @location(0) vec4<f32> {
-    let coverage = clamp(input.half_pixels + vec2<f32>(0.5) - abs(input.local_pixels), vec2<f32>(0.0), vec2<f32>(1.0));
+    // Limit coverage by the actual width even for subpixel edges centred on a
+    // pixel. This prevents a thin line acquiring a minimum visible thickness.
+    let coverage = min(2.0 * input.half_pixels,
+        clamp(input.half_pixels + vec2<f32>(0.5) - abs(input.local_pixels), vec2<f32>(0.0), vec2<f32>(1.0)));
     let fraction = clamp(0.5 + input.local_pixels.x / max(2.0 * input.half_pixels.x, 0.000001), 0.0, 1.0);
     let color = mix(input.color, input.end_color, fraction);
     return vec4<f32>(color.rgb, color.a * coverage.x * coverage.y);

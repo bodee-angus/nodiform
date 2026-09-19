@@ -1,5 +1,6 @@
 /* @controls {
   "count": {"type":"integer","label":"Generation number","description":"Create nodes 1 through this number.","default":20,"min":1},
+  "colorBy": {"type":"select","label":"Colour by","default":"birth-order","options":["birth-order","parity","number-type"]},
   "ticksPerNode": {"type":"integer","label":"Ticks between births","default":24,"min":0},
   "strength": {"type":"number","label":"Connection strength","default":4,"min":0},
   "finalTicks": {"type":"integer","label":"Final settling ticks","default":240,"min":0}
@@ -8,40 +9,27 @@
 // Each number connects to every smaller positive integer that divides it exactly.
 // 8 connects to 4, 2, 1. 12 connects to 6, 4, 3, 2, 1.
 // Node 1 has no connections at birth. Each divisor gets exactly one edge.
-// Generate one palette colour per node, then sort by hue.
-// Increasing node numbers follow red, yellow, green, cyan, blue, magenta.
+// Colour by birth order, odd/even membership, or type (1 / prime / composite).
+// Newly encountered categories follow red, yellow, green, cyan, blue, magenta.
 
 function* generate(N, params) {
     const count = params.count ?? 20;
     const ticks = params.ticksPerNode ?? 24;
     const strength = params.strength ?? 4;
     const finalTicks = params.finalTicks ?? 240;
+    const colorBy = params.colorBy ?? "birth-order";
 
     if (!Number.isSafeInteger(count) || count < 1) {
         throw new Error("Generation number must be a positive safe integer.");
     }
 
-    function hueOf(hex) {
-        const r = parseInt(hex.slice(1, 3), 16);
-        const g = parseInt(hex.slice(3, 5), 16);
-        const b = parseInt(hex.slice(5, 7), 16);
-        const maximum = Math.max(r, g, b);
-        const delta = maximum - Math.min(r, g, b);
-
-        if (delta === 0) return 360;
-
-        let hue;
-        if (maximum === r) hue = (g - b) / delta;
-        else if (maximum === g) hue = (b - r) / delta + 2;
-        else hue = (r - g) / delta + 4;
-
-        return (hue * 60 + 360) % 360;
+    if (!["birth-order", "parity", "number-type"].includes(colorBy)) {
+        throw new Error('Colour by must be "birth-order", "parity", or "number-type".');
     }
-
-    const colors = N.palette(count)
-        .map((color, index) => ({ color, index, hue: hueOf(color) }))
-        .sort((a, b) => a.hue - b.hue || a.index - b.index)
-        .map(entry => entry.color);
+    const categoryCount = colorBy === "birth-order" ? count : colorBy === "parity" ?
+        Math.min(2, count) : count >= 4 ? 3 : count >= 2 ? 2 : 1;
+    const colors = N.palette(categoryCount);
+    const categories = new Map();
 
     function properDivisors(number) {
         const divisors = [];
@@ -64,7 +52,10 @@ function* generate(N, params) {
     for (let number = 1; number <= count; number++) {
         const divisors = properDivisors(number);
         const id = String(number);
-        const color = colors[number - 1];
+        const category = colorBy === "birth-order" ? number : colorBy === "parity" ?
+            number % 2 : number === 1 ? "one" : divisors.length === 1 ? "prime" : "composite";
+        if (colorBy !== "birth-order" && !categories.has(category)) categories.set(category, categories.size);
+        const color = colors[colorBy === "birth-order" ? number - 1 : categories.get(category)];
 
         const edges = divisors.map(divisor => N.edge(id, String(divisor), {
             id: `${number}:${divisor}`,

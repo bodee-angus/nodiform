@@ -1,8 +1,10 @@
 // A dependency-free palette with fixed OKLCH lightness and chroma, returning sRGB hex.
 // Oklab conversion matrices: Björn Ottosson's public-domain reference,
 // https://bottosson.github.io/posts/oklab/ (2021-01-25 matrices).
-// Only hue changes. These common-gamut values fit the entire hue circle without
-// clipping channels or reducing chroma for individual colours. Conversion to
+// Only hue changes, in rainbow order. These common-gamut values fit the entire
+// hue circle without clipping channels or reducing chroma for individual colours.
+// L=0.7501536182, C=0.1275292193 is the full-circle sRGB chroma maximum;
+// the values below retain a little numerical headroom. Conversion to
 // 8-bit hex introduces small rounding differences and, in large palettes,
 // repeated colours. No finite colour space can supply unlimited unique colours.
 (() => {
@@ -10,15 +12,16 @@
     // Captured only inside the private bundled runner; standalone use needs no host.
     const reportProgress = typeof checkpointHost === 'function' ? checkpointHost : () => {};
     const integer = Number.isSafeInteger;
-    const slice = Function.prototype.call.bind(Array.prototype.slice);
     const push = Function.prototype.call.bind(Array.prototype.push);
+    const sort = Function.prototype.call.bind(Array.prototype.sort);
+    const sliceString = Function.prototype.call.bind(String.prototype.slice);
+    const parse = Number.parseInt;
     const ErrorType = Error;
     const math = Math;
-    const chosen = [];
-    const lightness = 0.75;
-    const chroma = 0.127;
-    const hueStep = 0.6180339887498949;
-    const startingHue = 255 / 360;
+    const lightness = 0.75015;
+    const chroma = 0.1275;
+    // The sRGB red axis (green = blue) on this fixed-lightness/chroma circle.
+    const startingHue = 20.52934746176819 / 360;
 
     function linearRgb(a, b) {
         const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3;
@@ -31,10 +34,10 @@
         ];
     }
 
-    function colourAt(index) {
-        // Golden-angle spacing spreads neighbouring entries around the circle.
-        // The index alone determines hue, so growing a palette preserves its prefix.
-        const angle = ((startingHue + index * hueStep) % 1) * math.PI * 2;
+    function colourAt(index, count) {
+        // Every size spans the whole rainbow, so different sizes need not share
+        // a prefix. The final entry approaches red without repeating the endpoint.
+        const angle = (startingHue + index / count) * math.PI * 2;
         const rgb = linearRgb(chroma * math.cos(angle), chroma * math.sin(angle));
         const digits = '0123456789abcdef';
         let hex = '#';
@@ -48,15 +51,37 @@
         return hex;
     }
 
+    function rgbHue(hex) {
+        const packed = parse(sliceString(hex, 1), 16);
+        const r = packed >>> 16, g = (packed >>> 8) & 255, b = packed & 255;
+        const maximum = math.max(r, g, b);
+        const delta = maximum - math.min(r, g, b);
+        if (delta === 0) return 0;
+        let hue;
+        if (maximum === r) hue = (g - b) / delta;
+        else if (maximum === g) hue = (b - r) / delta + 2;
+        else hue = (r - g) / delta + 4;
+        return hue < 0 ? hue + 6 : hue;
+    }
+
     return function palette(count) {
         if (!integer(count) || count < 0) {
             throw new ErrorType('palette(count) requires a nonnegative safe integer');
         }
+        const chosen = [];
         while (chosen.length < count) {
             if ((chosen.length & 255) === 0) reportProgress();
-            push(chosen, colourAt(chosen.length));
+            push(chosen, colourAt(chosen.length, count));
         }
-        // Caller edits must never affect a later palette request.
-        return slice(chosen, 0, count);
+        // Rounding to 8-bit channels can make nearby hues swap order. Sort the
+        // final hex colours so even very large palettes retain rainbow order.
+        let comparisons = 0;
+        sort(chosen, (a, b) => {
+            if ((comparisons++ & 255) === 0) reportProgress();
+            return rgbHue(a) - rgbHue(b);
+        });
+        // Each request owns its array. Retaining many differently sized palettes
+        // in a private cache would unnecessarily duplicate experiment memory.
+        return chosen;
     };
 })()

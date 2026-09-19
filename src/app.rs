@@ -31,6 +31,12 @@ struct Project {
     recording: RecordingConfig,
     #[serde(default)]
     size_by_connections: bool,
+    #[serde(default = "default_edge_width")]
+    edge_width: f32,
+}
+
+fn default_edge_width() -> f32 {
+    1.0
 }
 
 impl Default for Project {
@@ -49,6 +55,7 @@ impl Default for Project {
                 codec: "libx264".into(),
             },
             size_by_connections: false,
+            edge_width: default_edge_width(),
         }
     }
 }
@@ -76,6 +83,7 @@ pub struct NodiformApp {
     render_state: eframe::egui_wgpu::RenderState,
     texture: egui::TextureId,
     timeline: Option<Timeline>,
+    progress: Option<playback::RunProgress>,
     job: Option<RuleJob>,
     pending_run: Option<(Intent, Project)>,
     recorder: Option<Recorder>,
@@ -156,6 +164,7 @@ impl NodiformApp {
             render_state,
             texture,
             timeline: None,
+            progress: None,
             job: None,
             pending_run: None,
             recorder: None,
@@ -200,9 +209,26 @@ impl NodiformApp {
             if std::env::var("NODIFORM_SMOKE_DEGREE").as_deref() == Ok("1") {
                 app.project.size_by_connections = true;
             }
+            if let Ok(width) = std::env::var("NODIFORM_SMOKE_EDGE_WIDTH") {
+                app.project.edge_width = width
+                    .parse()
+                    .map_err(|_| "Invalid smoke-test edge thickness")?;
+                validate_project(&app.project)?;
+            }
             // Exercise the actual child process, timeline and rendering path.
-            // Preview never creates a project, recording or output directory.
-            app.request(Intent::Preview);
+            // Recording smoke tests use an explicit or temporary output folder.
+            let intent = if std::env::var("NODIFORM_SMOKE_INTENT").as_deref() == Ok("record") {
+                app.output_dir = std::env::var_os("NODIFORM_SMOKE_OUTPUT_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        std::env::temp_dir()
+                            .join(format!("nodiform-smoke-recording-{}", std::process::id()))
+                    });
+                Intent::Record
+            } else {
+                Intent::Preview
+            };
+            app.request(intent);
         }
         Ok(app)
     }
@@ -222,7 +248,12 @@ impl NodiformApp {
             return;
         }
         let ready = probe.ready(self.tick, self.graph.nodes.len(), self.graph.edges.len());
-        if !ready && self.error.is_none() {
+        let wait_for_completion = std::env::var("NODIFORM_SMOKE_COMPLETE").as_deref() == Ok("1")
+            && !self
+                .progress
+                .as_ref()
+                .is_some_and(|progress| progress.state == playback::RunState::Complete);
+        if (!ready || wait_for_completion) && self.error.is_none() {
             ctx.request_repaint_after(Duration::from_millis(8));
             return;
         }
@@ -241,6 +272,12 @@ impl NodiformApp {
             return;
         }
         if self.error.is_none() {
+            if self.recorder.is_some() {
+                // Do not report a successful recording smoke test until FFmpeg
+                // has encoded every queued frame and committed the manifest.
+                ctx.request_repaint_after(Duration::from_millis(16));
+                return;
+            }
             if self
                 .smoke_idle_since
                 .is_some_and(|since| since.elapsed() < Duration::from_millis(300))
@@ -260,13 +297,14 @@ impl NodiformApp {
         let result = self.error.clone().map_or_else(
             || {
                 Ok(format!(
-                    "{} GUI updates, {} ticks, {} nodes, {} edges; preview {} × {} physical pixels; {}",
+                    "{} GUI updates, {} ticks, {} nodes, {} edges; preview {} × {} physical pixels; progress {:.1}%; {}",
                     frames,
                     self.tick,
                     self.graph.nodes.len(),
                     self.graph.edges.len(),
                     self.preview_pixels.0,
                     self.preview_pixels.1,
+                    self.progress.as_ref().map_or(0.0, |progress| progress.fraction() * 100.0),
                     self.adapter
                 ))
             },
@@ -335,6 +373,9 @@ impl NodiformApp {
             snapshot.seed,
         ) {
             Ok(job) => {
+                if intent != Intent::Validate {
+                    self.progress = None;
+                }
                 self.job = Some(job);
                 self.pending_run = Some((intent, snapshot));
                 self.status = "Checking your rules in an isolated JavaScript worker…".into();
@@ -357,6 +398,10 @@ impl NodiformApp {
             );
             return Ok(());
         }
+        self.progress = Some(playback::RunProgress::new(
+            intent == Intent::Record,
+            planned_ticks,
+        ));
         if intent == Intent::Record {
             let effective_parameters = crate::experiment::merge_defaults(
                 &crate::experiment::parse_controls(&snapshot.source)?,
@@ -369,6 +414,7 @@ impl NodiformApp {
                 "rule_api":crate::rules::RULE_API_VERSION,
                 "effective_parameters": effective_parameters,
                 "node_size_rule":if snapshot.size_by_connections { "obsidian-global-sqrt-uncapped-v1" } else { "rule-radius" },
+                "edge_width_multiplier":snapshot.edge_width,
                 "forces":{"version":crate::model::FORCE_VERSION,"repulsion":crate::model::REPULSION,"default_edge_strength":crate::model::DEFAULT_EDGE_STRENGTH,"softening_squared":crate::model::SOFTENING_SQUARED,"rest_length":0,"gravity":0,"momentum_retention":crate::model::MOMENTUM_RETENTION,"max_displacement":crate::model::MAX_DISPLACEMENT,"base_timestep":crate::model::BASE_TIMESTEP,"step_policy":"min(base_timestep,0.5/max_incident_strength)"},
                 "birth_placement":crate::model::BIRTH_PLACEMENT_VERSION,
                 "ticks_per_frame":snapshot.ticks_per_frame,
@@ -392,8 +438,12 @@ impl NodiformApp {
     fn begin_simulation(&mut self, snapshot: Project, plan: Plan) -> Result<(), String> {
         self.graph = Graph::new(snapshot.seed);
         self.gpu.set_degree_sizing(snapshot.size_by_connections);
+        self.gpu.set_edge_width(snapshot.edge_width);
         self.gpu.sync_graph(&self.graph, true)?;
         self.timeline = Some(Timeline::new(plan, snapshot.tail_ticks));
+        if let (Some(progress), Some(timeline)) = (&mut self.progress, &self.timeline) {
+            progress.observe(timeline);
+        }
         self.project = snapshot;
         self.pending_frame = None;
         self.finishing = false;
@@ -414,6 +464,13 @@ impl NodiformApp {
     }
 
     fn stop(&mut self) {
+        let completed_simulation =
+            self.error.is_none() && self.timeline.as_ref().is_some_and(Timeline::finished);
+        if !completed_simulation {
+            if let Some(progress) = &mut self.progress {
+                progress.stop(self.error.is_some());
+            }
+        }
         if let Some(job) = &mut self.job {
             job.cancel();
         }
@@ -421,14 +478,27 @@ impl NodiformApp {
         self.pending_run = None;
         self.recorder_start = None;
         self.prepared_run = None;
-        self.timeline = None;
+        // The encoder may still be draining a fully simulated run. Retain its
+        // finished timeline so closing the window cannot relabel it as stopped.
+        if !completed_simulation {
+            self.timeline = None;
+        }
         self.paused = false;
         self.reset_preview_clock();
         // An already rendered frame must reach the encoder before its channel is closed.
         if self.pending_frame.is_none() {
             self.finish_recording();
         }
-        self.status = "Stopped. Finalising any recorded frames…".into();
+        self.status = if completed_simulation && self.recorder.is_some() {
+            "Finalising recorded video…"
+        } else if completed_simulation {
+            "Preview complete."
+        } else if self.recorder.is_some() {
+            "Stopped. Finalising recorded frames…"
+        } else {
+            "Preview stopped."
+        }
+        .into();
     }
 
     fn finish_recording(&mut self) {
@@ -444,6 +514,9 @@ impl NodiformApp {
             if let Some(recorder) = &mut self.recorder {
                 if let Err(error) = recorder.set_run_outcome(outcome) {
                     self.error = Some(error);
+                    if let Some(progress) = &mut self.progress {
+                        progress.stop(true);
+                    }
                 }
                 recorder.finish();
                 self.finishing = true;
@@ -519,6 +592,9 @@ impl NodiformApp {
                 self.gpu.sync_graph(&self.graph, false)?;
                 self.components = self.graph.component_count();
             }
+            if let Some(progress) = &mut self.progress {
+                progress.observe(timeline);
+            }
         }
         self.preview_dirty = true;
         Ok(())
@@ -553,6 +629,9 @@ impl NodiformApp {
                 }
                 Err(error) => {
                     self.prepared_run = None;
+                    if let Some(progress) = &mut self.progress {
+                        progress.stop(true);
+                    }
                     self.error = Some(error);
                     self.status = "Recording did not start. Preview is still available.".into();
                 }
@@ -564,6 +643,11 @@ impl NodiformApp {
                 match result.and_then(|plan| self.start(intent, snapshot, plan)) {
                     Ok(()) => (),
                     Err(error) => {
+                        if intent != Intent::Validate {
+                            if let Some(progress) = &mut self.progress {
+                                progress.stop(true);
+                            }
+                        }
                         self.error = Some(error);
                         self.status = "The run did not start.".into();
                     }
@@ -571,6 +655,9 @@ impl NodiformApp {
             }
         }
         if let Some(result) = self.recorder.as_mut().and_then(Recorder::poll) {
+            if let Some(progress) = &mut self.progress {
+                progress.encoding_finished(result.is_ok());
+            }
             if let Err(error) = &result {
                 self.error = Some(error.clone());
                 let outcome = self.run_outcome("error");
@@ -597,6 +684,9 @@ impl NodiformApp {
                     Ok(returned) => self.pending_frame = returned,
                     Err(error) => {
                         self.error = Some(error);
+                        if let Some(progress) = &mut self.progress {
+                            progress.stop(true);
+                        }
                         self.timeline = None;
                         self.finish_recording();
                     }
@@ -688,6 +778,8 @@ impl NodiformApp {
                         serde_json::to_string_pretty(&project.parameters).unwrap();
                     self.project = project;
                     self.gpu.set_degree_sizing(self.project.size_by_connections);
+                    self.gpu.set_edge_width(self.project.edge_width);
+                    self.progress = None;
                     self.preview_dirty = true;
                     self.project_path = Some(path);
                     self.status = "Project opened. Validate or preview when ready.".into();
@@ -766,6 +858,9 @@ fn validate_project(project: &Project) -> Result<(), String> {
     if !project.parameters.is_object() {
         return Err("Parameters must be an object.".into());
     }
+    if !project.edge_width.is_finite() || !(0.25..=8.0).contains(&project.edge_width) {
+        return Err("Edge thickness must be between 0.25× and 8×.".into());
+    }
     if project.source.len() > 1_048_576 {
         return Err("Rule source exceeds 1 MiB.".into());
     }
@@ -791,6 +886,7 @@ mod tests {
     fn project_round_trip() {
         let original = Project {
             size_by_connections: true,
+            edge_width: 3.25,
             ..Project::default()
         };
         let saved = serde_json::to_string(&original).unwrap();
@@ -799,13 +895,16 @@ mod tests {
         assert_eq!(original.source, restored.source);
         assert_eq!(original.parameters, restored.parameters);
         assert!(restored.size_by_connections);
+        assert_eq!(restored.edge_width, 3.25);
     }
     #[test]
     fn older_projects_keep_fixed_rule_radii_by_default() {
         let mut value = serde_json::to_value(Project::default()).unwrap();
         value.as_object_mut().unwrap().remove("size_by_connections");
+        value.as_object_mut().unwrap().remove("edge_width");
         let restored: Project = serde_json::from_value(value).unwrap();
         assert!(!restored.size_by_connections);
+        assert_eq!(restored.edge_width, 1.0);
         validate_project(&restored).unwrap();
     }
     #[test]
@@ -815,5 +914,22 @@ mod tests {
             ..Project::default()
         };
         assert!(validate_project(&project).is_err());
+    }
+    #[test]
+    fn reject_invalid_edge_thickness() {
+        for width in [0.0, 0.24, 8.01, f32::NAN, f32::INFINITY] {
+            let project = Project {
+                edge_width: width,
+                ..Project::default()
+            };
+            assert!(validate_project(&project).is_err());
+        }
+        for width in [0.25, 1.0, 8.0] {
+            let project = Project {
+                edge_width: width,
+                ..Project::default()
+            };
+            validate_project(&project).unwrap();
+        }
     }
 }

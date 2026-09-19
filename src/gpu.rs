@@ -63,10 +63,14 @@ struct PhysicsParameters {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct FrameParameters {
+    // The camera bounds shader reads the first 16 bytes; the renderer also
+    // reads appearance settings from the second, explicitly padded block.
     width: f32,
     height: f32,
     count: u32,
     edges: u32,
+    edge_width: f32,
+    padding: [f32; 3],
 }
 
 /// Storage counts grow geometrically, bounded only by the selected GPU's
@@ -273,6 +277,7 @@ pub struct GpuGraph {
     base_styles: Vec<NodeStyle>,
     incident_degrees: Vec<u32>,
     degree_sizing: bool,
+    edge_width: f32,
     output: FrameTarget,
     preview: FrameTarget,
 }
@@ -448,6 +453,7 @@ impl GpuGraph {
             base_styles: Vec::new(),
             incident_degrees: Vec::new(),
             degree_sizing: false,
+            edge_width: 1.0,
             output,
             preview,
         })
@@ -756,6 +762,16 @@ impl GpuGraph {
         }
     }
 
+    /// Multiply the base 0.18-world-unit edge width in both preview and export.
+    /// This appearance setting preserves zoom scaling and never changes forces.
+    pub fn set_edge_width(&mut self, multiplier: f32) {
+        self.edge_width = if multiplier.is_finite() {
+            multiplier.clamp(0.25, 8.0)
+        } else {
+            1.0
+        };
+    }
+
     fn write_display_styles(&self) {
         self.write_styles(&self.base_styles, &self.incident_degrees);
     }
@@ -851,6 +867,8 @@ impl GpuGraph {
             height: dimensions.1 as f32,
             count: self.node_count as u32,
             edges: self.edge_count as u32,
+            edge_width: self.edge_width,
+            padding: [0.0; 3],
         };
         self.queue
             .write_buffer(&target.frame_parameters, 0, bytemuck::bytes_of(&parameters));
@@ -1078,6 +1096,8 @@ impl FrameTarget {
                 height: 720.0,
                 count: 0,
                 edges: 0,
+                edge_width: 1.0,
+                padding: [0.0; 3],
             },
         );
         let bounds_groups = std::array::from_fn(|i| {
@@ -1573,7 +1593,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<super::GpuEdge>(), 32);
         assert_eq!(std::mem::size_of::<super::Neighbour>(), 16);
         assert_eq!(std::mem::size_of::<super::PhysicsParameters>(), 32);
-        assert_eq!(std::mem::size_of::<super::FrameParameters>(), 16);
+        assert_eq!(std::mem::size_of::<super::FrameParameters>(), 32);
     }
 
     /// Opt-in actual backend validation, also usable with Mesa lavapipe in CI:
@@ -1794,6 +1814,7 @@ mod tests {
             (175..=200).contains(&middle[0]) && (175..=200).contains(&middle[2]) && middle[1] < 30,
             "Expected linear-light red/blue midpoint near #bc00bc, got {middle:?}"
         );
+        validate_edge_width(&mut gpu);
         gradient
             .apply(&Event::SetNode {
                 id: "blue".into(),
@@ -2323,7 +2344,60 @@ mod tests {
             .collect()
     }
 
+    fn validate_edge_width(gpu: &mut super::GpuGraph) {
+        // The caller's red-to-blue horizontal edge has opaque endpoints, so
+        // adding its linear-light red and blue channels measures coverage.
+        // Check both targets, different resolutions, and a subpixel edge on
+        // the centre row of an odd-height image, where naive AA adds width.
+        let positions = gpu.read_positions(2).unwrap();
+        for (width, height, preview) in [(1024, 128, false), (768, 96, true), (64, 9, false)] {
+            for multiplier in [0.25, 1.0, 8.0] {
+                gpu.set_edge_width(multiplier);
+                gpu.reset_camera();
+                let (frame, camera) = if preview {
+                    gpu.render_preview(width, height);
+                    (
+                        gpu.read_preview_rgba().unwrap(),
+                        read_target_camera(gpu, &gpu.preview),
+                    )
+                } else {
+                    gpu.render(width, height);
+                    (gpu.read_rgba().unwrap(), read_camera(gpu))
+                };
+                let integrated_width: f32 = (0..height as usize)
+                    .map(|y| {
+                        let start = (y * width as usize + width as usize / 2) * 4;
+                        let rgb = super::linear_color([
+                            f32::from(frame[start]) / 255.0,
+                            f32::from(frame[start + 1]) / 255.0,
+                            f32::from(frame[start + 2]) / 255.0,
+                            1.0,
+                        ]);
+                        assert!(rgb[1] < 0.001);
+                        rgb[0] + rgb[2]
+                    })
+                    .sum();
+                let expected = 0.18 * multiplier * height as f32 / (2.0 * camera[3]);
+                assert!(
+                    (integrated_width - expected).abs() < expected * 0.012 + 0.03,
+                    "Edge width {multiplier}× at {width}×{height}, preview={preview}: \
+                     expected {expected} pixels, measured {integrated_width}"
+                );
+                assert_eq!(gpu.read_positions(2).unwrap(), positions);
+            }
+        }
+        // Restoring the default must restore the original appearance, without
+        // a simulation reset. Subsequent checks continue testing live gradients.
+        gpu.set_edge_width(1.0);
+        gpu.reset_camera();
+        gpu.render(1024, 128);
+    }
+
     fn read_camera(gpu: &super::GpuGraph) -> [f32; 4] {
+        read_target_camera(gpu, &gpu.output)
+    }
+
+    fn read_target_camera(gpu: &super::GpuGraph, target: &super::FrameTarget) -> [f32; 4] {
         use eframe::wgpu;
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("test camera readback"),
@@ -2336,7 +2410,7 @@ mod tests {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("test camera transfer"),
             });
-        encoder.copy_buffer_to_buffer(&gpu.output.camera, 0, &buffer, 0, 16);
+        encoder.copy_buffer_to_buffer(&target.camera, 0, &buffer, 0, 16);
         gpu.queue.submit(Some(encoder.finish()));
         let bytes = gpu.map_readback(&buffer).unwrap();
         std::array::from_fn(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))

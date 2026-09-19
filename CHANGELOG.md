@@ -1,5 +1,15 @@
 # Release changes
 
+## 0.1.8
+
+- Added a persistent **Edge thickness** slider in Settings → Appearance, from 0.25× to 8×. It affects preview and video independently of force strengths, updates live in preview, and is frozen during recording. Older projects default to 1×.
+- Added timeline progress for preview and recording, including every script wait and both script and application final settling intervals. Completed and stopped progress remains visible; video finalisation has a separate status.
+- Added **Colour by** settings to every example, including the starter. Structural categories receive successive rainbow colours in order of first appearance; birth-order modes traverse the rainbow as nodes arrive.
+- Changed palettes to rainbow hue order, with count-dependent spacing. Fixed OKLCH lightness 0.75015 and chroma 0.1275 approach the maximum common sRGB chroma without changing lightness or chroma between hues. The chroma increase from 0.1.7 is small; equal perceptual vividness limits maximum saturation across all hues.
+- Added **Fibonacci chain**: maximum 20 creates nodes 0–20, then adds the Fibonacci links 3–5, 5–8 and 8–13 after the sequential chain. Self-loops and duplicate chain edges are omitted.
+
+The rule API is now `nodiform-rules-v6`. Palette calls use the new rainbow ordering, and increasing the palette count no longer preserves a prefix. Saved source and literal hex colours are unchanged. Force and birth policies remain `nodiform-force-v3` and `live-neighbour-centroid-v2`. The existing Gear Lever update channel continues to work.
+
 ## 0.1.7
 
 - Added **Prime factors**, with edge strength multiplied by each prime factor's exponent and an optional shared node-1 anchor. Prime nodes omit self-connections; 1 is not a prime factor.

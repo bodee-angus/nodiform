@@ -1,5 +1,6 @@
 /* @controls {
   "count": {"type":"integer","label":"Nodes","default":80,"min":1},
+  "colorBy": {"type":"select","label":"Colour by","default":"birth-order","options":["birth-order","alternating","single"]},
   "ticksPerNode": {"type":"integer","label":"Ticks between births","default":12,"min":0,"max":1000000},
   "finalTicks": {"type":"integer","label":"Final settling ticks","default":0,"min":0,"max":1000000}
 } */
@@ -12,7 +13,8 @@ function* generate(N, params) {
     if (!Number.isSafeInteger(count) || count < 1) {
         throw new Error("count must be a positive safe integer");
     }
-    const colors = N.palette(Math.min(count, 8));
+    const mode = params.colorBy ?? "birth-order";
+    const colors = N.palette(mode === "birth-order" ? count : mode === "alternating" ? Math.min(count, 2) : 1);
     for (let n = 0; n < count; n++) {
         const edges = [];
         if (n > 0) {
@@ -27,7 +29,7 @@ function* generate(N, params) {
         }
         yield N.batch([N.node(String(n), {
             label: String(n + 1), radius: 1.5,
-            color: colors[Math.floor(N.random() * colors.length)]
+            color: colors[mode === "birth-order" ? n : mode === "alternating" ? n % 2 : 0]
         })], edges);
         yield N.wait(ticks);
     }
